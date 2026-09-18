@@ -63,6 +63,7 @@ def test_create_ticket_returns_201_and_ticket_data():
     ("I cannot access my account", "high"),
     ("How do I change my password", "low"),
     ("Feature request: dark mode", "low"),
+    ("Charged twice", "high"),
     ("My monitor flickers sometimes", "medium"),
 ])
 def test_priority_is_computed_correctly(description, expected_priority):
