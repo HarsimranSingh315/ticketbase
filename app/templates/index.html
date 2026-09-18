@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Tickets — TicketBase{% endblock %}
+
+{% block content %}
+
+<section class="card">
+    <h2>New ticket</h2>
+    <form method="post" action="/ui/tickets" class="create-form">
+        <textarea name="description" rows="2" placeholder="Describe the issue..." required></textarea>
+        <button type="submit">Create ticket</button>
+    </form>
+</section>
+
+<section class="card">
+    <div class="filters">
+        <span>Tickets</span>
+        <div class="filter-links">
+            <a href="/" class="{{ 'active' if not current_status else '' }}">All</a>
+            <a href="/?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+            <a href="/?status=in_progress" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
+            <a href="/?status=resolved" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+        </div>
+    </div>
+
+    {% if tickets %}
+        <table class="ticket-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Description</th>
+                    <th>Priority</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in tickets %}
+                <tr>
+                    <td>#{{ t.id }}</td>
+                    <td class="desc-cell">{{ t.description }}</td>
+                    <td><span class="badge priority-{{ t.priority.value }}">{{ t.priority.value }}</span></td>
+                    <td>
+                        {% if t.category %}
+                            <span class="badge category-badge">{{ t.category }}{% if not t.category_confirmed %} (unconfirmed){% endif %}</span>
+                        {% else %}
+                            <span class="muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge status-{{ t.status.value }}">{{ t.status.value }}</span></td>
+                    <td><a href="/ui/tickets/{{ t.id }}">View</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="muted">No tickets yet.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

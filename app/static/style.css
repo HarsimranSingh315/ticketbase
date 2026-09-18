@@ -1,0 +1,104 @@
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 24px;
+    color: #1a1a1a;
+    background: #fafafa;
+}
+
+header { margin-bottom: 24px; }
+header h1 { margin: 0; font-size: 22px; }
+header h1 a { color: #1a1a1a; text-decoration: none; }
+.tagline { margin: 2px 0 0; color: #777; font-size: 13px; }
+
+.card {
+    background: white;
+    border: 1px solid #e2e2e2;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+}
+.card h2, .card h3 { margin-top: 0; font-size: 16px; }
+
+.create-form textarea {
+    width: 100%;
+    font-family: inherit;
+    font-size: 14px;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    resize: vertical;
+}
+.create-form button, .inline-form button {
+    margin-top: 8px;
+    padding: 6px 14px;
+    background: #1f3864;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+}
+.create-form button:hover, .inline-form button:hover { background: #16294a; }
+
+.filters {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    font-weight: 600;
+    font-size: 14px;
+}
+.filter-links a {
+    margin-left: 10px;
+    color: #555;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: normal;
+}
+.filter-links a.active { color: #1f3864; font-weight: 600; }
+
+.ticket-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ticket-table th {
+    text-align: left;
+    border-bottom: 1px solid #e2e2e2;
+    padding: 6px 8px;
+    color: #777;
+    font-weight: 600;
+}
+.ticket-table td { padding: 8px; border-bottom: 1px solid #f0f0f0; }
+.desc-cell { max-width: 300px; }
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.priority-high { background: #fde2e2; color: #a12222; }
+.priority-medium { background: #fff3cd; color: #8a6d00; }
+.priority-low { background: #e2eefd; color: #1a5aa1; }
+.status-open { background: #fff3cd; color: #8a6d00; }
+.status-in_progress { background: #e2eefd; color: #1a5aa1; }
+.status-resolved { background: #dff5e1; color: #1a7a34; }
+.category-badge { background: #ece2fd; color: #5a1aa1; }
+
+.muted { color: #999; }
+.back-link { display: inline-block; margin-bottom: 12px; color: #555; text-decoration: none; font-size: 13px; }
+
+.ticket-description { font-size: 15px; }
+.ticket-meta { display: flex; gap: 8px; margin: 10px 0; }
+.created-at { color: #999; font-size: 12px; }
+
+.inline-form { display: flex; gap: 8px; align-items: center; }
+.inline-form select, .inline-form input {
+    padding: 6px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.hint-text { color: #999; font-size: 12px; margin-top: 10px; }

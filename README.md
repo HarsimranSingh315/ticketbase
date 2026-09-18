@@ -14,6 +14,10 @@ uvicorn app.main:app --reload
 
 Visit `http://127.0.0.1:8000/docs` for interactive API docs.
 
+Visit `http://127.0.0.1:8000/` for the web UI — create tickets, filter by
+status, view details, confirm categories, and update status, all from
+the browser.
+
 In a second terminal, use the CLI:
 
 ```bash
@@ -22,6 +26,10 @@ python cli.py list
 python cli.py status 1 in_progress
 python cli.py confirm-category 1 connectivity
 ```
+
+Both the web UI and the CLI call the exact same underlying `crud.py`
+functions - no logic is duplicated between them, only the presentation
+differs.
 
 ## Run the tests
 
@@ -88,6 +96,16 @@ comment in `tests/test_tickets.py` for the full explanation.
 
 This is a legitimate "one failed approach and what I learned" story for
 an interview - not a hypothetical one.
+
+A second one, from building the web UI: `templates.TemplateResponse()`
+threw `TypeError: unhashable type: 'dict'` on every page load. Cause:
+Starlette 1.6.0 changed the expected call signature - `request` must now
+be passed as the first positional argument (`TemplateResponse(request,
+"name.html", {...})`), not buried inside the context dictionary
+(`TemplateResponse("name.html", {"request": request, ...})`, the older,
+widely-documented pattern). Caught by actually loading the page and
+reading the real traceback, not by assuming the code was correct because
+it "looked standard."
 
 ## Next steps (Project 2 preview)
 
