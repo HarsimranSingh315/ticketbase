@@ -5,8 +5,11 @@
 
 <section class="card">
     <h2>New ticket</h2>
+    {% if form_error %}
+    <div class="error-banner">{{ form_error }}</div>
+    {% endif %}
     <form method="post" action="/ui/tickets" class="create-form">
-        <textarea name="description" rows="2" placeholder="Describe the issue..." required></textarea>
+        <textarea name="description" rows="2" placeholder="Describe the issue..." required>{{ submitted_description or '' }}</textarea>
         <button type="submit">Create ticket</button>
     </form>
 </section>

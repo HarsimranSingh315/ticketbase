@@ -102,3 +102,13 @@ header h1 a { color: #1a1a1a; text-decoration: none; }
     font-size: 13px;
 }
 .hint-text { color: #999; font-size: 12px; margin-top: 10px; }
+
+.error-banner {
+    background: #fde2e2;
+    color: #a12222;
+    border: 1px solid #f5b5b5;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    font-size: 13px;
+}

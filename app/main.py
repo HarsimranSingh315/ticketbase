@@ -16,6 +16,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
+from pydantic import ValidationError
 
 from app.database import engine, Base, get_db
 from app import crud, schemas
@@ -92,12 +93,31 @@ def ui_index(request: Request, status: Optional[str] = None, db: Session = Depen
 
 
 @app.post("/ui/tickets")
-def ui_create_ticket(description: str = Form(...), db: Session = Depends(get_db)):
+def ui_create_ticket(request: Request, description: str = Form(...), db: Session = Depends(get_db)):
     # Route the raw form input through the SAME TicketCreate schema the
     # JSON API uses - this is what makes the whitespace validator (and
     # any future validation added to TicketCreate) apply here too,
     # instead of silently only protecting one of the two entry points.
-    validated = schemas.TicketCreate(description=description)
+    try:
+        validated = schemas.TicketCreate(description=description)
+    except ValidationError as exc:
+        # Pull out just the human-readable messages, not Pydantic's full
+        # internal error structure - that's meant for API clients, not
+        # a page a person is looking at.
+        error_messages = [err["msg"].removeprefix("Value error, ") for err in exc.errors()]
+        tickets = crud.list_tickets(db)
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {
+                "tickets": tickets,
+                "current_status": None,
+                "form_error": "; ".join(error_messages),
+                "submitted_description": description,
+            },
+            status_code=422,
+        )
+
     crud.create_ticket(db, validated.description)
     return RedirectResponse(url="/", status_code=303)
 
