@@ -6,13 +6,20 @@ to differ, and often should.
 """
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from app.models import TicketStatus, TicketPriority
 
 
 class TicketCreate(BaseModel):
     """What a client sends to create a ticket."""
     description: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_only_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Description must not be empty or only whitespace.")
+        return value
 
 
 class TicketStatusUpdate(BaseModel):

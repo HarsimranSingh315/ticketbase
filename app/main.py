@@ -93,7 +93,12 @@ def ui_index(request: Request, status: Optional[str] = None, db: Session = Depen
 
 @app.post("/ui/tickets")
 def ui_create_ticket(description: str = Form(...), db: Session = Depends(get_db)):
-    crud.create_ticket(db, description)
+    # Route the raw form input through the SAME TicketCreate schema the
+    # JSON API uses - this is what makes the whitespace validator (and
+    # any future validation added to TicketCreate) apply here too,
+    # instead of silently only protecting one of the two entry points.
+    validated = schemas.TicketCreate(description=description)
+    crud.create_ticket(db, validated.description)
     return RedirectResponse(url="/", status_code=303)
 
 
