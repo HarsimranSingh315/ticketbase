@@ -10,6 +10,7 @@ it's how you'll manually poke at the API while building the CLI.
 
 Visit http://127.0.0.1:8000/ for the web UI.
 """
+from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Form
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,7 +37,7 @@ def create_ticket(payload: schemas.TicketCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/tickets", response_model=list[schemas.TicketOut])
-def list_tickets(status: str | None = None, priority: str | None = None, db: Session = Depends(get_db)):
+def list_tickets(status: Optional[str] = None, priority: Optional[str] = None, db: Session = Depends(get_db)):
     return crud.list_tickets(db, status=status, priority=priority)
 
 
@@ -83,7 +84,7 @@ def health_check():
 # no logic is duplicated, only the presentation differs.
 
 @app.get("/")
-def ui_index(request: Request, status: str | None = None, db: Session = Depends(get_db)):
+def ui_index(request: Request, status: Optional[str] = None, db: Session = Depends(get_db)):
     tickets = crud.list_tickets(db, status=status)
     return templates.TemplateResponse(
         request, "index.html", {"tickets": tickets, "current_status": status}
