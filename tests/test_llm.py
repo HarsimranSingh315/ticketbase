@@ -93,12 +93,39 @@ def test_llm_error_status_falls_back_to_template(mock_post, llm_client):
 def test_llm_malformed_response_falls_back_to_template(mock_post, llm_client):
     mock_resp = Mock()
     mock_resp.status_code = 200
+    mock_resp.text = '{"unexpected": "shape"}'
     mock_resp.json.return_value = {"unexpected": "shape"}
     mock_post.return_value = mock_resp
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
     resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
     assert resp.status_code == 200
     assert resp.json()["draft_source"] == "template"
+
+
+@patch("app.llm.requests.post")
+def test_llm_empty_content_falls_back_to_template(mock_post, llm_client):
+    # The real bug found via live testing: a reasoning-capable free-tier
+    # model (Groq's gpt-oss family) can return HTTP 200 with a non-empty
+    # `reasoning` field but an EMPTY `content` field, if it spends its
+    # whole token budget on internal reasoning before writing an answer.
+    # This used to fail completely silently - same log output as
+    # "disabled". Now it must fall back cleanly AND be logged.
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.text = '{"choices": [{"message": {"content": "", "reasoning": "thinking..."}, "finish_reason": "length"}]}'
+    mock_resp.json.return_value = {
+        "choices": [{
+            "message": {"content": "", "reasoning": "thinking really hard..."},
+            "finish_reason": "length",
+        }]
+    }
+    mock_post.return_value = mock_resp
+    ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["draft_source"] == "template"
+    assert data["category"] == "connectivity"  # retrieval is unaffected
 
 
 @patch("app.llm.requests.post")

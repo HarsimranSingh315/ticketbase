@@ -75,7 +75,16 @@ def generate_grounded_draft(
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 220,
+                "max_tokens": 500,
+                # Several free-tier models (e.g. Groq's gpt-oss family)
+                # are "reasoning" models that spend part of the token
+                # budget on an internal reasoning trace before writing
+                # the actual reply. For a short, close-ended rewrite
+                # like this one, that reasoning is pure overhead - it
+                # was silently eating the whole max_tokens budget in
+                # testing, leaving an empty final answer. Providers that
+                # don't recognize this field just ignore it.
+                "reasoning_effort": "low",
             },
             timeout=settings.llm_timeout_seconds,
         )
@@ -95,12 +104,24 @@ def generate_grounded_draft(
 
     try:
         data = response.json()
-        text = data["choices"][0]["message"]["content"].strip()
+        message = data["choices"][0]["message"]
+        text = (message.get("content") or "").strip()
     except (KeyError, IndexError, ValueError) as exc:
-        logger.warning("LLM response had unexpected shape: %s", exc)
+        logger.warning("LLM response had unexpected shape: %s. Body: %s", exc, response.text[:300])
         return None
 
     if not text:
+        # This used to fail completely silently - the exact bug that
+        # made a real, working API call look identical to "disabled" in
+        # the logs. Now it's visible, and shows what actually came back
+        # (e.g. a non-empty `reasoning` field with an empty `content`
+        # field is the reasoning-budget issue described above).
+        logger.warning(
+            "LLM returned an empty completion, falling back to template. "
+            "finish_reason=%s message_keys=%s",
+            data.get("choices", [{}])[0].get("finish_reason"),
+            list(message.keys()) if isinstance(message, dict) else None,
+        )
         return None
 
     return text
