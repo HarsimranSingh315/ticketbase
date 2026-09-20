@@ -249,6 +249,30 @@ workflow itself only runs once this repo is actually pushed to GitHub.
 actually checks DB connectivity (`SELECT 1`) instead of unconditionally
 returning `ok`.
 
+**A fourth debugging story, and a real one - this shipped, then broke on
+someone's machine.** The new `app/auth.py` used `str | None` (Python
+3.10+ union syntax) for the `X-API-Key` header parameter. This project's
+own git history had already fixed this exact class of bug once before
+(see the Python 3.9 compatibility fix in the commit log) - and I
+reintroduced it anyway in new code, because everything I tested ran on
+this environment's Python 3.12, where that syntax works fine. It only
+surfaced when run on a Mac with Python 3.9 (`str | None` raises
+`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`
+at import time, not just at type-check time - FastAPI actually
+evaluates parameter annotations at runtime to build the route). Fixed
+by switching to `typing.Optional[str]`, consistent with how the rest of
+the codebase already handles this. More importantly: added
+`tests/test_python39_compat.py`, which parses every file in `app/` with
+Python's own `ast` module and fails if it finds unguarded `X | None`
+syntax in a type-annotation position - specifically scoped to
+annotations only, not real bitwise-OR expressions, to avoid false
+positives. I verified it actually works by deliberately reintroducing
+the bug, confirming the test failed and pointed at the exact line, then
+restoring the fix and confirming it passed again. This is what actually
+prevents this bug from coming back, regardless of which Python version
+happens to be running the test suite - a comment or a one-off manual
+check wouldn't have.
+
 ## Next steps
 
 - Swap `DATABASE_URL` to the Postgres URL and run `docker-compose up -d`

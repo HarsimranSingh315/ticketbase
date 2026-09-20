@@ -30,3 +30,26 @@ jobs:
           rm -f ci_migration_check.db
           DATABASE_URL="sqlite:///./ci_migration_check.db" alembic upgrade head
           rm -f ci_migration_check.db
+
+  python39-import-check:
+    # This project has broken before from PEP 604 union syntax (`X | None`)
+    # that only works on Python 3.10+, discovered when a contributor ran it
+    # on macOS system Python 3.9. The main test job runs on 3.12 and can't
+    # catch that by itself, so this separate job actually installs 3.9 via
+    # actions/setup-python (reliable regardless of the runner's own apt
+    # packages) and imports the app with it - a real regression check.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Import the app under Python 3.9
+        run: python -c "import app.main"
+

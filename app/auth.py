@@ -13,13 +13,15 @@ A real multi-tenant product would need per-user auth instead; that's a
 much bigger change and out of scope here, same spirit as the "Non-goals"
 section in the README.
 """
+from typing import Optional
+
 from fastapi import Header, HTTPException, status, Depends
 
 from app.config import get_settings, Settings
 
 
 def require_api_key(
-    x_api_key: str | None = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None),
     settings: Settings = Depends(get_settings),
 ) -> None:
     if not settings.api_key:
