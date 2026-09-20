@@ -51,6 +51,23 @@ def list_tickets(
     )
 
 
+def list_other_tickets(db: Session, exclude_id: int, limit: int = 300) -> list[models.Ticket]:
+    """
+    All tickets except `exclude_id`, most recent first, capped at
+    `limit`. Used by app/related_tickets.py as the candidate pool to
+    compare a ticket against. The cap exists because that comparison
+    embeds every candidate on the fly (see related_tickets.py) - fine
+    at portfolio scale, but a real cap rather than an unbounded query.
+    """
+    return (
+        db.query(models.Ticket)
+        .filter(models.Ticket.id != exclude_id)
+        .order_by(models.Ticket.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def update_status(db: Session, ticket_id: int, status: str) -> Optional[models.Ticket]:
     ticket = get_ticket(db, ticket_id)
     if ticket is None:

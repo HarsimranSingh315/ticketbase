@@ -65,3 +65,11 @@ class SuggestionOut(BaseModel):
     sources: list[SuggestionSource] = []
     draft_response: str
     draft_source: str = "template"
+
+
+class RelatedTicketOut(BaseModel):
+    """One ticket found similar to another (see app/related_tickets.py)."""
+    id: int
+    description: str
+    status: str
+    similarity: float

@@ -37,6 +37,7 @@ from app.config import get_settings, Settings
 from app.database import engine, Base, get_db, SessionLocal
 from app import crud, schemas
 from app.auth import require_api_key
+from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index
 
 settings = get_settings()
@@ -182,6 +183,29 @@ def suggest_ticket_category(
     )
 
 
+@app.get("/tickets/{ticket_id}/related", response_model=list[schemas.RelatedTicketOut])
+def get_related_tickets(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    rag_index: RAGIndex = Depends(get_rag_index),
+):
+    """
+    "Has this happened before?" - up to 3 similar past tickets, found by
+    reusing the same embedder SupportRAG already builds (see
+    app/related_tickets.py). Read-only, informational, no confirm step
+    needed since nothing here is a decision the way a category is.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    return [
+        schemas.RelatedTicketOut(id=r.id, description=r.description, status=r.status, similarity=r.similarity)
+        for r in related
+    ]
+
+
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
     """
@@ -240,12 +264,18 @@ def ui_create_ticket(request: Request, description: str = Form(...), db: Session
 
 
 @app.get("/ui/tickets/{ticket_id}")
-def ui_ticket_detail(request: Request, ticket_id: int, db: Session = Depends(get_db)):
+def ui_ticket_detail(
+    request: Request, ticket_id: int,
+    db: Session = Depends(get_db),
+    rag_index: RAGIndex = Depends(get_rag_index),
+):
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
     return templates.TemplateResponse(
-        request, "ticket_detail.html", {"ticket": ticket}
+        request, "ticket_detail.html", {"ticket": ticket, "related_tickets": related}
     )
 
 
@@ -262,8 +292,10 @@ def ui_suggest_category(
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     rag = SupportRAGService(rag_index, rag_settings)
     suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
+    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
     return templates.TemplateResponse(
-        request, "ticket_detail.html", {"ticket": ticket, "suggestion": suggestion}
+        request, "ticket_detail.html", {"ticket": ticket, "suggestion": suggestion, "related_tickets": related}
     )
 
 

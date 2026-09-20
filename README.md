@@ -352,6 +352,42 @@ Also added the same rate limit to the no-JS fallback route
 (`/ui/tickets/{id}/suggest`) that the JSON API route already had - it
 runs the identical compute-heavy suggestion logic and had been missed.
 
+## Related tickets ("has this happened before?")
+
+Real ticketing tools leave this as manual work: an agent has to think
+to search for a duplicate, then search well, then read through results
+themselves. `GET /tickets/{id}/related` (and an automatic panel on
+every ticket's detail page - no button, since unlike a category
+suggestion there's no "confirm" step attached to it) surfaces up to 3
+similar past tickets automatically.
+
+**Deliberately reuses infrastructure, doesn't add new infrastructure.**
+`app/related_tickets.py` reuses the exact same fitted TF-IDF/SVD
+embedder that `RAGIndex` already builds for the knowledge base -
+no second vocabulary to fit or keep in sync. The tradeoff is the same
+one already documented for SupportRAG (TF-IDF matches shared
+vocabulary, not deep meaning), and it's an honest one here too: I
+tested it against three tickets (two genuinely about VPN issues, one
+about billing) and it correctly matched the two VPN tickets at 97%
+similarity while correctly excluding the unrelated one - verified from
+the actual JSON response and the actual rendered HTML, not assumed.
+
+**A real, named scaling limit, not a hidden one.** Unlike the knowledge
+base (16 fixed articles, embedded once at startup), tickets are created
+continuously, so there's no fixed corpus to pre-embed at startup. This
+computes embeddings for candidate tickets on the fly, per request,
+capped at the 300 most recent other tickets
+(`crud.list_other_tickets`). That's fine at portfolio scale but would
+need precomputed, stored embeddings (same pattern as
+`KnowledgeArticle.embedding`) for a real high-volume deployment - noted
+in Next steps below rather than silently left for someone to discover.
+
+Covered by 6 tests (`tests/test_related_tickets.py`): finds a genuinely
+similar ticket, never returns the ticket itself, returns an empty list
+rather than a forced weak match when nothing is actually similar,
+handles zero-other-tickets and nonexistent-ticket cases, and confirms
+the panel actually renders in the HTML.
+
 ## Next steps
 
 - Swap `DATABASE_URL` to the Postgres URL and run `docker-compose up -d`
@@ -360,9 +396,13 @@ runs the identical compute-heavy suggestion logic and had been missed.
   push similarity search into the database
 - Grow the knowledge base beyond 16 seed articles (ideally from real
   resolved tickets) to reduce the TF-IDF noise described above
+- Store each ticket's embedding at creation time (same pattern as
+  `KnowledgeArticle.embedding`) instead of recomputing it on every
+  related-tickets lookup, once ticket volume goes beyond portfolio scale
 - Optionally add a generative step (an LLM call) that rewrites the
   drafted response in a more natural voice, while keeping the same
   cited-sources-and-abstain-path structure - the retrieval layer this
-  version built is what makes that safe to add later
+  version built is what makes that safe to add later (this is now done -
+  see the Optional LLM-drafted responses section above)
 - Actually run `docker compose up --build` end-to-end somewhere with a
   Docker daemon, since that step couldn't be verified in this sandbox
