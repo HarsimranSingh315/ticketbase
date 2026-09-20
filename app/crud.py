@@ -32,6 +32,7 @@ def list_tickets(
     db: Session,
     status: Optional[str] = None,
     priority: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list[models.Ticket]:
@@ -40,6 +41,8 @@ def list_tickets(
         query = query.filter(models.Ticket.status == status)
     if priority:
         query = query.filter(models.Ticket.priority == priority)
+    if q:
+        query = query.filter(models.Ticket.description.ilike(f"%{q}%"))
     return (
         query.order_by(models.Ticket.created_at.desc())
         .offset(offset)

@@ -151,6 +151,25 @@ textarea:focus-visible, select:focus-visible {
 }
 .tabs a.active { color: var(--ink); border-bottom-color: var(--pine); font-weight: 600; }
 
+.list-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.search-form input[type="search"] {
+    padding: 6px 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius);
+    background: var(--paper-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    width: 200px;
+}
+.search-form input[type="search"]:focus { border-color: var(--pine); }
+
 .ledger { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .ledger tr { border-bottom: 1px solid var(--rule); }
 .ledger tr:hover td { background: var(--paper-raised); }
@@ -266,6 +285,15 @@ textarea:focus-visible, select:focus-visible {
 .suggestion-box.is-abstained {
     border-color: var(--ink-faint);
     background: var(--paper-raised);
+}
+.suggestion-box.is-loading {
+    border-color: var(--ink-faint);
+    background: var(--paper-raised);
+    animation: suggestion-pulse 1.4s ease-in-out infinite;
+}
+@keyframes suggestion-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 .suggestion-label {

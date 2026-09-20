@@ -14,11 +14,17 @@
 </section>
 
 <section class="panel">
-    <div class="tabs">
-        <a href="/" class="{{ 'active' if not current_status else '' }}">All</a>
-        <a href="/?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
-        <a href="/?status=in_progress" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
-        <a href="/?status=resolved" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+    <div class="list-controls">
+        <div class="tabs">
+            <a href="/{{ '?q=' + current_q if current_q }}" class="{{ 'active' if not current_status else '' }}">All</a>
+            <a href="/?status=open{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+            <a href="/?status=in_progress{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
+            <a href="/?status=resolved{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+        </div>
+        <form method="get" action="/" class="search-form">
+            {% if current_status %}<input type="hidden" name="status" value="{{ current_status }}">{% endif %}
+            <input type="search" name="q" value="{{ current_q or '' }}" placeholder="Search descriptions…">
+        </form>
     </div>
 
     {% if tickets %}
@@ -48,7 +54,11 @@
             </tbody>
         </table>
     {% else %}
-        <p class="empty-state">Nothing logged yet — describe an issue above to open the first ticket.</p>
+        {% if current_q %}
+            <p class="empty-state">No tickets match "{{ current_q }}".</p>
+        {% else %}
+            <p class="empty-state">Nothing logged yet — describe an issue above to open the first ticket.</p>
+        {% endif %}
     {% endif %}
 </section>
 

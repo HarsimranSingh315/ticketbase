@@ -320,6 +320,38 @@ evidence point the same way.
 say "(AI-written, grounded in the source above)" instead of
 "(templated from the source above)" once it's working.
 
+## Search, and AJAX suggestion loading
+
+Two smaller additions, both motivated by real gaps rather than added
+for their own sake:
+
+**Search** — `GET /tickets?q=...` (and the web UI's search box) filters
+by description substring, case-insensitive, composable with the
+existing `status` filter. `crud.list_tickets` gained a `q` parameter;
+covered by two new tests (`test_list_tickets_search_by_description`,
+`test_list_tickets_search_combines_with_status_filter`).
+
+**AJAX-loaded suggestions** — the LLM step above means `/suggest` can
+now take a few seconds instead of milliseconds. A full-page form POST
+with no feedback during that wait looks frozen, so `app/static/app.js`
+intercepts the "Suggest a category" form, shows a pulsing loading state
+while the request is in flight, and renders the result client-side from
+the same JSON the API already returns - no new endpoint. This is
+progressive enhancement, not a requirement: the plain HTML form POST
+(`/ui/tickets/{id}/suggest`) still works completely unchanged if
+JavaScript fails or is disabled, and the JS itself falls back to a
+normal form submit if the `fetch()` call errors. Verified the JS
+references the exact field names the API actually returns (a quick
+Python script cross-checked `data.category`, `data.sources[].title`,
+etc. against a real API response), and checked the file parses as
+valid JavaScript with `node --check` - I don't have a real browser in
+this sandbox to confirm the rendered DOM visually, so a quick look in
+an actual browser is still worth doing yourself.
+
+Also added the same rate limit to the no-JS fallback route
+(`/ui/tickets/{id}/suggest`) that the JSON API route already had - it
+runs the identical compute-heavy suggestion logic and had been missed.
+
 ## Next steps
 
 - Swap `DATABASE_URL` to the Postgres URL and run `docker-compose up -d`

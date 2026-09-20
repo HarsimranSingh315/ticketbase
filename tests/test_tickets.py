@@ -77,3 +77,30 @@ def test_invalid_status_value_is_rejected(client):
     ticket = client.post("/tickets", json={"description": "test"}).json()
     resp = client.patch(f"/tickets/{ticket['id']}/status", json={"status": "not_a_real_status"})
     assert resp.status_code == 422
+
+
+def test_list_tickets_search_by_description(client):
+    client.post("/tickets", json={"description": "My VPN will not connect"})
+    client.post("/tickets", json={"description": "Charged twice for my order"})
+    client.post("/tickets", json={"description": "Printer is offline"})
+
+    results = client.get("/tickets", params={"q": "VPN"}).json()
+    assert len(results) == 1
+    assert "VPN" in results[0]["description"]
+
+    # Search is case-insensitive
+    results_lower = client.get("/tickets", params={"q": "vpn"}).json()
+    assert len(results_lower) == 1
+
+    no_match = client.get("/tickets", params={"q": "nonexistent-keyword-xyz"}).json()
+    assert no_match == []
+
+
+def test_list_tickets_search_combines_with_status_filter(client):
+    t1 = client.post("/tickets", json={"description": "VPN connection issue"}).json()
+    t2 = client.post("/tickets", json={"description": "VPN certificate expired"}).json()
+    client.patch(f"/tickets/{t2['id']}/status", json={"status": "resolved"})
+
+    open_vpn = client.get("/tickets", params={"q": "VPN", "status": "open"}).json()
+    assert len(open_vpn) == 1
+    assert open_vpn[0]["id"] == t1["id"]

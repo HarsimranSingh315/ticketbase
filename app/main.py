@@ -113,11 +113,12 @@ def create_ticket(payload: schemas.TicketCreate, db: Session = Depends(get_db)):
 def list_tickets(
     status: Optional[str] = None,
     priority: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = Query(default=settings.default_page_size, ge=1, le=settings.max_page_size),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    return crud.list_tickets(db, status=status, priority=priority, limit=limit, offset=offset)
+    return crud.list_tickets(db, status=status, priority=priority, q=q, limit=limit, offset=offset)
 
 
 @app.get("/tickets/{ticket_id}", response_model=schemas.TicketOut)
@@ -208,10 +209,10 @@ def health_check(db: Session = Depends(get_db)):
 # here (see README's Non-goals).
 
 @app.get("/")
-def ui_index(request: Request, status: Optional[str] = None, db: Session = Depends(get_db)):
-    tickets = crud.list_tickets(db, status=status, limit=settings.max_page_size)
+def ui_index(request: Request, status: Optional[str] = None, q: Optional[str] = None, db: Session = Depends(get_db)):
+    tickets = crud.list_tickets(db, status=status, q=q, limit=settings.max_page_size)
     return templates.TemplateResponse(
-        request, "index.html", {"tickets": tickets, "current_status": status}
+        request, "index.html", {"tickets": tickets, "current_status": status, "current_q": q}
     )
 
 
@@ -249,6 +250,7 @@ def ui_ticket_detail(request: Request, ticket_id: int, db: Session = Depends(get
 
 
 @app.post("/ui/tickets/{ticket_id}/suggest")
+@limiter.limit(settings.suggest_rate_limit)
 def ui_suggest_category(
     request: Request, ticket_id: int,
     db: Session = Depends(get_db),

@@ -45,9 +45,9 @@
 
 <section class="panel">
     <h2>SupportRAG suggestion</h2>
-
+    <div id="suggestion-container">
     {% if not suggestion %}
-        <form method="post" action="/ui/tickets/{{ ticket.id }}/suggest">
+        <form id="suggest-form" method="post" action="/ui/tickets/{{ ticket.id }}/suggest" data-ticket-id="{{ ticket.id }}">
             <button type="submit" class="btn btn-quiet">Suggest a category</button>
         </form>
     {% else %}
@@ -86,6 +86,7 @@
         </div>
         <p class="hint">This is a suggestion, not a decision. Use "Confirm category" above to accept it.</p>
     {% endif %}
+    </div>
 </section>
 
 {% endblock %}
