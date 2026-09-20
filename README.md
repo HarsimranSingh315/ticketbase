@@ -284,10 +284,23 @@ still passes unmodified.
 **Why Groq, and why it's genuinely free:** researched current (2026)
 free-tier LLM APIs before picking one. Groq offers a free, no-credit-
 card developer tier (30 requests/minute, 14,400/day) over an OpenAI-
-compatible API, with several open-weight models (Llama 3.3 70B and
-others) available on it. `LLM_API_BASE`/`LLM_MODEL` are just config, so
+compatible API, with several open-weight models available. `LLM_API_BASE`/`LLM_MODEL` are just config, so
 switching to another OpenAI-compatible free provider (OpenRouter,
-Cerebras) needs no code change.
+Cerebras) - or another model on Groq itself - needs no code change.
+
+**This volatility isn't hypothetical - it happened during testing.**
+The default model this section first shipped with
+(`llama-3.3-70b-versatile`) stopped being available on a real account
+within weeks: a live `curl https://api.groq.com/openai/v1/models` call
+during testing showed it gone from the catalog entirely, replaced by
+models like `openai/gpt-oss-20b` and `qwen/qwen3.8-27b`. The app
+behaved exactly as designed when this happened - every suggestion
+correctly fell back to the deterministic template with a clear
+`WARNING ticketbase.llm` log line, rather than breaking - but the
+default needed updating regardless, now `openai/gpt-oss-20b`. This is
+the single best piece of evidence in this whole project that the
+fail-safe design was worth building: it wasn't a hypothetical resilience
+story, it's what actually happened on a real account during real testing.
 
 **What the LLM is and isn't allowed to do.** The prompt in `app/llm.py`
 is deliberately close-ended: rewrite this specific retrieved article

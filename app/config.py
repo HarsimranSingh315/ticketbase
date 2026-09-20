@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # feature - see app/llm.py.
     llm_api_key: str = ""
     llm_api_base: str = "https://api.groq.com/openai/v1"
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-20b"
     llm_timeout_seconds: float = 8.0
 
 
