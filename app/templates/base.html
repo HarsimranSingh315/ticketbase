@@ -2,17 +2,24 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>{% block title %}TicketBase{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <header>
-        <h1><a href="/">TicketBase</a></h1>
-        <p class="tagline">Support ticket system — Project 1</p>
-    </header>
-    <main>
-        {% block content %}{% endblock %}
-    </main>
+    <div class="shell">
+        <header class="site-header">
+            <div>
+                <a href="/" class="wordmark">TicketBase</a>
+                <p class="tagline">Support ticket ledger</p>
+            </div>
+        </header>
+        <main>
+            {% block content %}{% endblock %}
+        </main>
+    </div>
 </body>
 </html>

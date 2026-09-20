@@ -3,61 +3,52 @@
 
 {% block content %}
 
-<section class="card">
-    <h2>New ticket</h2>
+<section class="panel">
     {% if form_error %}
     <div class="error-banner">{{ form_error }}</div>
     {% endif %}
-    <form method="post" action="/ui/tickets" class="create-form">
-        <textarea name="description" rows="2" placeholder="Describe the issue..." required>{{ submitted_description or '' }}</textarea>
-        <button type="submit">Create ticket</button>
+    <form method="post" action="/ui/tickets" class="log-form">
+        <textarea name="description" rows="2" placeholder="Describe the issue…" required>{{ submitted_description or '' }}</textarea>
+        <button type="submit" class="btn">Log ticket</button>
     </form>
 </section>
 
-<section class="card">
-    <div class="filters">
-        <span>Tickets</span>
-        <div class="filter-links">
-            <a href="/" class="{{ 'active' if not current_status else '' }}">All</a>
-            <a href="/?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
-            <a href="/?status=in_progress" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
-            <a href="/?status=resolved" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
-        </div>
+<section class="panel">
+    <div class="tabs">
+        <a href="/" class="{{ 'active' if not current_status else '' }}">All</a>
+        <a href="/?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+        <a href="/?status=in_progress" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
+        <a href="/?status=resolved" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
     </div>
 
     {% if tickets %}
-        <table class="ticket-table">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Description</th>
-                    <th>Priority</th>
-                    <th>Category</th>
-                    <th>Status</th>
-                    <th></th>
-                </tr>
-            </thead>
+        <table class="ledger">
             <tbody>
                 {% for t in tickets %}
                 <tr>
-                    <td>#{{ t.id }}</td>
-                    <td class="desc-cell">{{ t.description }}</td>
-                    <td><span class="badge priority-{{ t.priority.value }}">{{ t.priority.value }}</span></td>
-                    <td>
+                    <td class="ledger-id">
+                        <span class="priority-tick {{ t.priority.value }}"></span>
+                        #{{ t.id }}
+                    </td>
+                    <td class="ledger-desc">
+                        <a href="/ui/tickets/{{ t.id }}">{{ t.description }}</a>
+                    </td>
+                    <td class="ledger-meta">
                         {% if t.category %}
-                            <span class="badge category-badge">{{ t.category }}{% if not t.category_confirmed %} (unconfirmed){% endif %}</span>
+                            {{ t.category }}{% if not t.category_confirmed %} (pending){% endif %}
                         {% else %}
-                            <span class="muted">—</span>
+                            <span style="color: var(--ink-faint);">no category</span>
                         {% endif %}
                     </td>
-                    <td><span class="badge status-{{ t.status.value }}">{{ t.status.value }}</span></td>
-                    <td><a href="/ui/tickets/{{ t.id }}">View</a></td>
+                    <td class="ledger-meta">
+                        <span class="tag tag-status-{{ t.status.value }}">{{ t.status.value|replace('_', ' ') }}</span>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     {% else %}
-        <p class="muted">No tickets yet.</p>
+        <p class="empty-state">Nothing logged yet — describe an issue above to open the first ticket.</p>
     {% endif %}
 </section>
 

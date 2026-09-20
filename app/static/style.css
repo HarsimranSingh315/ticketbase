@@ -1,124 +1,329 @@
+/* ============================================================
+   TicketBase — design tokens
+   A ledger, not a dashboard. Confirmed facts read as settled
+   (solid, pine); AI suggestions read as provisional (dashed,
+   ochre) until a human confirms them — the visual language
+   mirrors the actual data model (see models.py).
+   ============================================================ */
+:root {
+    --paper: #EFF1EA;
+    --paper-raised: #F7F8F4;
+    --ink: #1C2420;
+    --ink-muted: #5C665C;
+    --ink-faint: #8B948A;
+    --rule: #CBD2C7;
+    --rule-strong: #A8B2A2;
+
+    --pine: #2E5C4C;
+    --pine-bg: #E3ECE6;
+    --ochre: #8A5F26;
+    --ochre-bg: #F2E9D8;
+    --brick: #A6432C;
+    --brick-bg: #F3E3DD;
+
+    --font-display: "Fraunces", Georgia, serif;
+    --font-body: "Public Sans", -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+
+    --radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
 * { box-sizing: border-box; }
 
+html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 800px;
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--ink);
+    background: var(--paper);
+    margin: 0;
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+}
+
+a { color: var(--pine); }
+a:focus-visible, button:focus-visible, input:focus-visible,
+textarea:focus-visible, select:focus-visible {
+    outline: 2px solid var(--pine);
+    outline-offset: 2px;
+}
+
+/* ---------- Shell ---------- */
+
+.shell {
+    max-width: 760px;
     margin: 0 auto;
-    padding: 24px;
-    color: #1a1a1a;
-    background: #fafafa;
+    padding: 28px 24px 64px;
 }
 
-header { margin-bottom: 24px; }
-header h1 { margin: 0; font-size: 22px; }
-header h1 a { color: #1a1a1a; text-decoration: none; }
-.tagline { margin: 2px 0 0; color: #777; font-size: 13px; }
-
-.card {
-    background: white;
-    border: 1px solid #e2e2e2;
-    border-radius: 8px;
-    padding: 16px 20px;
-    margin-bottom: 16px;
+.site-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    margin-bottom: 28px;
+    border-bottom: 1px solid var(--rule-strong);
 }
-.card h2, .card h3 { margin-top: 0; font-size: 16px; }
+.wordmark {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    text-decoration: none;
+}
+.site-header .tagline {
+    margin: 0;
+    color: var(--ink-faint);
+    font-size: 13px;
+}
 
-.create-form textarea {
+/* ---------- Sections ---------- */
+
+.panel {
+    padding: 22px 0;
+    border-bottom: 1px solid var(--rule);
+}
+.panel:last-child { border-bottom: none; }
+
+.panel h2 {
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-muted);
+    margin: 0 0 12px;
+}
+
+/* ---------- New ticket form ---------- */
+
+.log-form textarea {
     width: 100%;
-    font-family: inherit;
-    font-size: 14px;
-    padding: 8px;
-    border: 1px solid #ccc;
-    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 15px;
+    padding: 10px 12px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius);
+    background: var(--paper-raised);
+    color: var(--ink);
     resize: vertical;
 }
-.create-form button, .inline-form button {
-    margin-top: 8px;
-    padding: 6px 14px;
-    background: #1f3864;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 13px;
-}
-.create-form button:hover, .inline-form button:hover { background: #16294a; }
+.log-form textarea:focus { border-color: var(--pine); }
 
-.filters {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
+.btn {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: 13px;
     font-weight: 600;
+    cursor: pointer;
+}
+.btn:hover { background: var(--pine); }
+.btn-quiet {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--rule-strong);
+}
+.btn-quiet:hover { background: var(--paper-raised); border-color: var(--ink); }
+
+/* ---------- Ledger (ticket list) ---------- */
+
+.tabs {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 4px;
+}
+.tabs a {
+    text-decoration: none;
+    color: var(--ink-faint);
+    font-size: 13px;
+    padding-bottom: 6px;
+    border-bottom: 2px solid transparent;
+}
+.tabs a.active { color: var(--ink); border-bottom-color: var(--pine); font-weight: 600; }
+
+.ledger { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.ledger tr { border-bottom: 1px solid var(--rule); }
+.ledger tr:hover td { background: var(--paper-raised); }
+.ledger td { padding: 11px 10px 11px 12px; vertical-align: top; font-size: 14px; }
+.ledger td:first-child { padding-left: 0; position: relative; }
+
+.priority-tick {
+    position: absolute;
+    left: 0; top: 8px; bottom: 8px;
+    width: 3px;
+    border-radius: 2px;
+}
+.priority-tick.high { background: var(--brick); }
+.priority-tick.medium { background: var(--ochre); }
+.priority-tick.low { background: var(--rule-strong); }
+
+.ledger-id { font-family: var(--font-mono); font-size: 12px; color: var(--ink-faint); padding-left: 10px; }
+.ledger-desc { max-width: 320px; }
+.ledger-desc a { color: var(--ink); text-decoration: none; }
+.ledger-desc a:hover { color: var(--pine); }
+.ledger-meta { font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
+
+.tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 1px 7px;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+}
+.tag-status-open { color: var(--ochre); border-color: var(--ochre); }
+.tag-status-in_progress { color: var(--pine); border-color: var(--pine); }
+.tag-status-resolved { color: var(--ink-muted); border-color: var(--rule-strong); }
+
+.empty-state {
+    padding: 32px 0;
+    color: var(--ink-muted);
     font-size: 14px;
 }
-.filter-links a {
-    margin-left: 10px;
-    color: #555;
+
+/* ---------- Ticket dossier (detail page) ---------- */
+
+.back-link {
+    display: inline-block;
+    margin-bottom: 18px;
+    color: var(--ink-muted);
     text-decoration: none;
     font-size: 13px;
-    font-weight: normal;
 }
-.filter-links a.active { color: #1f3864; font-weight: 600; }
+.back-link:hover { color: var(--ink); }
 
-.ticket-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.ticket-table th {
-    text-align: left;
-    border-bottom: 1px solid #e2e2e2;
-    padding: 6px 8px;
-    color: #777;
-    font-weight: 600;
+.case-id { font-family: var(--font-mono); font-size: 13px; color: var(--ink-faint); }
+.case-headline {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 500;
+    line-height: 1.3;
+    margin: 4px 0 14px;
 }
-.ticket-table td { padding: 8px; border-bottom: 1px solid #f0f0f0; }
-.desc-cell { max-width: 300px; }
 
-.badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-}
-.priority-high { background: #fde2e2; color: #a12222; }
-.priority-medium { background: #fff3cd; color: #8a6d00; }
-.priority-low { background: #e2eefd; color: #1a5aa1; }
-.status-open { background: #fff3cd; color: #8a6d00; }
-.status-in_progress { background: #e2eefd; color: #1a5aa1; }
-.status-resolved { background: #dff5e1; color: #1a7a34; }
-.category-badge { background: #ece2fd; color: #5a1aa1; }
+.facts { list-style: none; padding: 0; margin: 0; display: flex; gap: 20px; flex-wrap: wrap; }
+.facts li { font-size: 13px; color: var(--ink-muted); }
+.facts b { color: var(--ink); font-weight: 600; }
 
-.muted { color: #999; }
-.back-link { display: inline-block; margin-bottom: 12px; color: #555; text-decoration: none; font-size: 13px; }
+/* ---------- Status / category forms ---------- */
 
-.ticket-description { font-size: 15px; }
-.ticket-meta { display: flex; gap: 8px; margin: 10px 0; }
-.created-at { color: #999; font-size: 12px; }
-
-.inline-form { display: flex; gap: 8px; align-items: center; }
-.inline-form select, .inline-form input {
-    padding: 6px;
-    border: 1px solid #ccc;
-    border-radius: 6px;
+.stack-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.stack-form select, .stack-form input[type="text"] {
+    padding: 7px 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius);
+    background: var(--paper-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
     font-size: 13px;
 }
-.hint-text { color: #999; font-size: 12px; margin-top: 10px; }
+
+.record {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    background: var(--pine-bg);
+    color: var(--pine);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+.record::before { content: "✓"; }
+
+.no-record { color: var(--ink-faint); font-size: 13px; margin: 0 0 10px; }
+
+.hint { color: var(--ink-faint); font-size: 12px; margin-top: 10px; }
 
 .error-banner {
-    background: #fde2e2;
-    color: #a12222;
-    border: 1px solid #f5b5b5;
-    border-radius: 6px;
-    padding: 8px 12px;
-    margin-bottom: 10px;
+    background: var(--brick-bg);
+    color: var(--brick);
+    border: 1px solid var(--brick);
+    border-radius: var(--radius);
+    padding: 9px 12px;
+    margin-bottom: 12px;
     font-size: 13px;
 }
+
+/* ---------- SupportRAG suggestion — the provisional panel ---------- */
+
+.suggestion-box {
+    border: 1.5px dashed var(--ochre);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    background: var(--ochre-bg);
+}
+.suggestion-box.is-abstained {
+    border-color: var(--ink-faint);
+    background: var(--paper-raised);
+}
+
+.suggestion-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ochre);
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.suggestion-label::before { content: "?"; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border: 1px solid var(--ochre); border-radius: 50%; font-size: 10px; }
+.is-abstained .suggestion-label { color: var(--ink-muted); }
+.is-abstained .suggestion-label::before { border-color: var(--ink-faint); content: "—"; }
+
+.suggested-category { font-size: 16px; font-weight: 600; color: var(--ink); margin: 0 0 10px; }
+
+.confidence-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.confidence-track {
+    flex: 1;
+    height: 6px;
+    background: var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.confidence-fill { height: 100%; background: var(--ochre); }
+.confidence-value { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); min-width: 34px; text-align: right; }
+
+.sources-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-muted); }
+.sources-list li { margin-bottom: 3px; }
+.sources-list .sim { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
 
 .draft-response {
     white-space: pre-wrap;
-    background: #f7f7f7;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    padding: 10px 12px;
+    background: var(--paper-raised);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-top: 12px;
     font-size: 13px;
-    font-family: inherit;
+    font-family: var(--font-body);
+    color: var(--ink);
+}
+
+details.disclosure summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--pine);
+    margin-top: 10px;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 560px) {
+    .shell { padding: 20px 16px 48px; }
+    .ledger, .ledger tbody, .ledger tr, .ledger td { display: block; width: 100%; }
+    .ledger tr { padding: 10px 0; }
+    .ledger td { padding: 2px 0 2px 12px; }
+    .ledger td:first-child { padding-left: 12px; }
+    .facts { gap: 10px 16px; }
 }
