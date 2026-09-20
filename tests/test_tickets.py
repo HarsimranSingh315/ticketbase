@@ -14,7 +14,9 @@ import pytest
 def test_health_check(client):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["database"] == "ok"
 
 
 def test_create_ticket_returns_201_and_ticket_data(client):

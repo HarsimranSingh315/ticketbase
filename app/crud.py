@@ -32,13 +32,20 @@ def list_tickets(
     db: Session,
     status: Optional[str] = None,
     priority: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
 ) -> list[models.Ticket]:
     query = db.query(models.Ticket)
     if status:
         query = query.filter(models.Ticket.status == status)
     if priority:
         query = query.filter(models.Ticket.priority == priority)
-    return query.order_by(models.Ticket.created_at.desc()).all()
+    return (
+        query.order_by(models.Ticket.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
 
 def update_status(db: Session, ticket_id: int, status: str) -> Optional[models.Ticket]:

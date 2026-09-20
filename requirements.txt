@@ -12,3 +12,7 @@ python-multipart>=0.0.12
 scikit-learn>=1.5
 numpy>=1.26
 pgvector>=0.3
+pydantic-settings>=2.5
+slowapi>=0.1.9
+alembic>=1.13
+python-dotenv>=1.0

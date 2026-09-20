@@ -21,6 +21,9 @@ first.
 
 Fix: define the engine, session, and override ONCE here in conftest.py,
 shared by every test file, so there's only one override to clobber.
+
+Note on `get_rag_index`: it's overridden here for a related reason -
+see `override_get_rag_index`'s docstring below.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -28,8 +31,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.main import app
+from app.main import app, get_rag_index
 from app.database import Base, get_db
+from app.supportrag import build_rag_index
 
 TEST_DB_URL = "sqlite:///:memory:"
 engine = create_engine(
@@ -48,7 +52,25 @@ def override_get_db():
         db.close()
 
 
+def override_get_rag_index():
+    """
+    Tests don't run the app's lifespan (no `with TestClient(app) as c:`),
+    so `request.app.state.rag_index` is never set by the real
+    `get_rag_index`. This override builds a fresh RAGIndex straight from
+    the TEST database instead - re-seeding+re-fitting per test is cheap
+    (16 short articles), and it also means SupportRAG tests never touch
+    the real dev/prod SQLite file the way running the real lifespan
+    against `app.database.engine` would.
+    """
+    db = TestSessionLocal()
+    try:
+        return build_rag_index(db)
+    finally:
+        db.close()
+
+
 app.dependency_overrides[get_db] = override_get_db
+app.dependency_overrides[get_rag_index] = override_get_rag_index
 
 
 @pytest.fixture(autouse=True)

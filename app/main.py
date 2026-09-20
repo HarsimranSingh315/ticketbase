@@ -5,42 +5,119 @@ Run it with:
     uvicorn app.main:app --reload
 
 Then visit http://127.0.0.1:8000/docs for FastAPI's auto-generated,
-interactive API documentation - this is a genuine feature, not a toy;
-it's how you'll manually poke at the API while building the CLI.
-
+interactive API documentation.
 Visit http://127.0.0.1:8000/ for the web UI.
+
+Production-readiness features (see README for the full writeup):
+- Config via app/config.py (.env-driven), not hardcoded values
+- The SupportRAG embedder is built ONCE at startup (RAGIndex, cached on
+  app.state), not refit on every request
+- Optional API-key auth on write endpoints (off by default; see app/auth.py)
+- Rate limiting on the compute-heavier /suggest endpoint
+- Structured logging with per-request timing
+- Consistent JSON error responses (no leaked stack traces)
+- Pagination on GET /tickets
 """
+import logging
+import time
+from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Request, Form
-from fastapi.responses import RedirectResponse
+
+from fastapi import FastAPI, Depends, HTTPException, Request, Form, Query
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from pydantic import ValidationError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-from app.database import engine, Base, get_db
+from app.config import get_settings
+from app.database import engine, Base, get_db, SessionLocal
 from app import crud, schemas
-from app.supportrag import SupportRAGService
+from app.auth import require_api_key
+from app.supportrag import SupportRAGService, RAGIndex, build_rag_index
 
-# Creates the tickets table if it doesn't exist yet. Fine for Week 1;
-# once this is a "real" project, you'd use Alembic migrations instead
-# of this auto-create (worth learning, but not a Week 1 concern).
-Base.metadata.create_all(bind=engine)
+settings = get_settings()
 
-app = FastAPI(title="TicketBase", version="0.1.0")
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("ticketbase")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Dev-friendly auto-create. Production deployments should instead
+    # run `alembic upgrade head` before starting the app (see
+    # alembic/README / the migrations section in the project README) -
+    # this create_all is a no-op against a DB that's already migrated.
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+    try:
+        app.state.rag_index = build_rag_index(db)
+    finally:
+        db.close()
+
+    logger.info("TicketBase startup complete (db=%s)", settings.database_url.split("://")[0])
+    yield
+    logger.info("TicketBase shutting down")
+
+
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI(title="TicketBase", version="0.2.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
 
-@app.post("/tickets", response_model=schemas.TicketOut, status_code=201)
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all so an unexpected error returns a clean JSON 500 instead of
+    leaking a raw traceback to the client. The real traceback still goes
+    to the server log, where it belongs.
+    """
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "%s %s -> %d (%.1fms)",
+        request.method, request.url.path, response.status_code, duration_ms,
+    )
+    return response
+
+
+def get_rag_index(request: Request) -> RAGIndex:
+    return request.app.state.rag_index
+
+
+@app.post("/tickets", response_model=schemas.TicketOut, status_code=201, dependencies=[Depends(require_api_key)])
 def create_ticket(payload: schemas.TicketCreate, db: Session = Depends(get_db)):
     ticket = crud.create_ticket(db, payload.description)
     return ticket
 
 
 @app.get("/tickets", response_model=list[schemas.TicketOut])
-def list_tickets(status: Optional[str] = None, priority: Optional[str] = None, db: Session = Depends(get_db)):
-    return crud.list_tickets(db, status=status, priority=priority)
+def list_tickets(
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    limit: int = Query(default=settings.default_page_size, ge=1, le=settings.max_page_size),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return crud.list_tickets(db, status=status, priority=priority, limit=limit, offset=offset)
 
 
 @app.get("/tickets/{ticket_id}", response_model=schemas.TicketOut)
@@ -51,7 +128,7 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
     return ticket
 
 
-@app.patch("/tickets/{ticket_id}/status", response_model=schemas.TicketOut)
+@app.patch("/tickets/{ticket_id}/status", response_model=schemas.TicketOut, dependencies=[Depends(require_api_key)])
 def update_ticket_status(ticket_id: int, payload: schemas.TicketStatusUpdate, db: Session = Depends(get_db)):
     ticket = crud.update_status(db, ticket_id, payload.status)
     if ticket is None:
@@ -59,12 +136,12 @@ def update_ticket_status(ticket_id: int, payload: schemas.TicketStatusUpdate, db
     return ticket
 
 
-@app.patch("/tickets/{ticket_id}/category", response_model=schemas.TicketOut)
+@app.patch("/tickets/{ticket_id}/category", response_model=schemas.TicketOut, dependencies=[Depends(require_api_key)])
 def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfirm, db: Session = Depends(get_db)):
     """
-    Confirms a ticket's category. In Week 1, a human types this in directly.
-    In Week 4+, an AI-suggested category will pre-fill this - but note it
-    still requires this exact same explicit confirmation call. The AI
+    Confirms a ticket's category. A human types this in directly, or an
+    AI-suggested category (from /suggest) pre-fills it - but this exact
+    same explicit confirmation call is still required either way. The AI
     never gets a shortcut around this endpoint.
     """
     ticket = crud.confirm_category(db, ticket_id, payload.category)
@@ -74,20 +151,23 @@ def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfi
 
 
 @app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut)
-def suggest_ticket_category(ticket_id: int, db: Session = Depends(get_db)):
+@limiter.limit(settings.suggest_rate_limit)
+def suggest_ticket_category(
+    request: Request, ticket_id: int,
+    db: Session = Depends(get_db),
+    rag_index: RAGIndex = Depends(get_rag_index),
+):
     """
     SupportRAG (Project 2): returns a suggested category + drafted
-    response, with cited sources and a confidence score. This is a
-    read-only, suggest-only endpoint - it never writes to the ticket.
-    To apply a suggestion, the caller (human, via the UI or CLI) still
-    has to call PATCH /tickets/{id}/category explicitly, same as if
-    they'd typed the category in from scratch.
+    response, with cited sources and a confidence score. Read-only -
+    never writes to the ticket. Rate-limited since it's the most
+    compute-heavy route in the app.
     """
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    rag = SupportRAGService(db)
-    suggestion = rag.suggest(ticket.description)
+    rag = SupportRAGService(rag_index)
+    suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     return schemas.SuggestionOut(
         abstained=suggestion.abstained,
         category=suggestion.category,
@@ -100,8 +180,19 @@ def suggest_ticket_category(ticket_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+def health_check(db: Session = Depends(get_db)):
+    """
+    Checks actual DB connectivity, not just "the process is running" -
+    a health check that always returns ok regardless of DB state isn't
+    a meaningful one in production.
+    """
+    try:
+        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        logger.exception("Health check DB connectivity failure")
+        db_ok = False
+    return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "unreachable"}
 
 
 # --- Web UI routes ---
@@ -109,11 +200,14 @@ def health_check():
 # These are deliberately separate from the JSON API routes above.
 # They render HTML (Jinja2 templates) and handle browser form submissions,
 # but they call the exact same crud.py functions the API and CLI use -
-# no logic is duplicated, only the presentation differs.
+# no logic is duplicated, only the presentation differs. Not gated by
+# require_api_key: that's for the JSON API (machine clients sending a
+# header); a browser session is a different auth concern, out of scope
+# here (see README's Non-goals).
 
 @app.get("/")
 def ui_index(request: Request, status: Optional[str] = None, db: Session = Depends(get_db)):
-    tickets = crud.list_tickets(db, status=status)
+    tickets = crud.list_tickets(db, status=status, limit=settings.max_page_size)
     return templates.TemplateResponse(
         request, "index.html", {"tickets": tickets, "current_status": status}
     )
@@ -121,16 +215,9 @@ def ui_index(request: Request, status: Optional[str] = None, db: Session = Depen
 
 @app.post("/ui/tickets")
 def ui_create_ticket(request: Request, description: str = Form(...), db: Session = Depends(get_db)):
-    # Route the raw form input through the SAME TicketCreate schema the
-    # JSON API uses - this is what makes the whitespace validator (and
-    # any future validation added to TicketCreate) apply here too,
-    # instead of silently only protecting one of the two entry points.
     try:
         validated = schemas.TicketCreate(description=description)
     except ValidationError as exc:
-        # Pull out just the human-readable messages, not Pydantic's full
-        # internal error structure - that's meant for API clients, not
-        # a page a person is looking at.
         error_messages = [err["msg"].removeprefix("Value error, ") for err in exc.errors()]
         tickets = crud.list_tickets(db)
         return templates.TemplateResponse(
@@ -160,18 +247,16 @@ def ui_ticket_detail(request: Request, ticket_id: int, db: Session = Depends(get
 
 
 @app.post("/ui/tickets/{ticket_id}/suggest")
-def ui_suggest_category(request: Request, ticket_id: int, db: Session = Depends(get_db)):
-    """
-    Web UI entry point for SupportRAG. Same suggest-only guarantee as
-    the JSON endpoint above: this route never writes to the ticket, it
-    just renders the suggestion on the page for a human to accept
-    (via the existing category-confirm form) or ignore.
-    """
+def ui_suggest_category(
+    request: Request, ticket_id: int,
+    db: Session = Depends(get_db),
+    rag_index: RAGIndex = Depends(get_rag_index),
+):
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    rag = SupportRAGService(db)
-    suggestion = rag.suggest(ticket.description)
+    rag = SupportRAGService(rag_index)
+    suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     return templates.TemplateResponse(
         request, "ticket_detail.html", {"ticket": ticket, "suggestion": suggestion}
     )

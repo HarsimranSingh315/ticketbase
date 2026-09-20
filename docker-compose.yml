@@ -9,6 +9,25 @@ services:
       - "5432:5432"
     volumes:
       - ticketbase_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketbase"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://ticketbase:ticketbase@postgres:5432/ticketbase
+      # Override these at deploy time (e.g. `docker compose run -e API_KEY=...`)
+      # rather than baking secrets into this file.
+      API_KEY: ${API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   ticketbase_pgdata:
