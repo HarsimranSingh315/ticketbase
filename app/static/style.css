@@ -83,6 +83,39 @@ textarea:focus-visible, select:focus-visible {
     font-size: 13px;
 }
 
+/* ---------- Stats bar (the ledger's "at a glance" header) ---------- */
+
+.stats-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 28px;
+}
+.stat-block {
+    background: var(--paper-raised);
+    padding: 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.stat-number {
+    font-family: var(--font-display);
+    font-size: 30px;
+    font-weight: 500;
+    color: var(--ink);
+    line-height: 1.1;
+}
+.stat-label {
+    font-size: 12px;
+    color: var(--ink-muted);
+}
+.stat-flag .stat-number { color: var(--brick); }
+.stat-flag .stat-label { color: var(--brick); }
+
 /* ---------- Sections ---------- */
 
 .panel {
@@ -297,6 +330,11 @@ textarea:focus-visible, select:focus-visible {
     border-radius: var(--radius);
     padding: 16px 18px;
     background: var(--ochre-bg);
+    animation: suggestion-reveal 0.35s ease-out;
+}
+@keyframes suggestion-reveal {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 .suggestion-box.is-abstained {
     border-color: var(--ink-faint);
@@ -370,4 +408,7 @@ details.disclosure summary {
     .ledger td { padding: 2px 0 2px 12px; }
     .ledger td:first-child { padding-left: 12px; }
     .facts { gap: 10px 16px; }
+    .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    .list-controls { flex-direction: column; align-items: stretch; }
+    .search-form input[type="search"] { width: 100%; }
 }

@@ -235,8 +235,9 @@ def health_check(db: Session = Depends(get_db)):
 @app.get("/")
 def ui_index(request: Request, status: Optional[str] = None, q: Optional[str] = None, db: Session = Depends(get_db)):
     tickets = crud.list_tickets(db, status=status, q=q, limit=settings.max_page_size)
+    stats = crud.get_ticket_stats(db)
     return templates.TemplateResponse(
-        request, "index.html", {"tickets": tickets, "current_status": status, "current_q": q}
+        request, "index.html", {"tickets": tickets, "current_status": status, "current_q": q, "stats": stats}
     )
 
 
@@ -247,6 +248,7 @@ def ui_create_ticket(request: Request, description: str = Form(...), db: Session
     except ValidationError as exc:
         error_messages = [err["msg"].removeprefix("Value error, ") for err in exc.errors()]
         tickets = crud.list_tickets(db)
+        stats = crud.get_ticket_stats(db)
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -255,6 +257,7 @@ def ui_create_ticket(request: Request, description: str = Form(...), db: Session
                 "current_status": None,
                 "form_error": "; ".join(error_messages),
                 "submitted_description": description,
+                "stats": stats,
             },
             status_code=422,
         )

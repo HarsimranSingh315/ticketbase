@@ -68,6 +68,34 @@ def list_other_tickets(db: Session, exclude_id: int, limit: int = 300) -> list[m
     )
 
 
+def get_ticket_stats(db: Session) -> dict:
+    """
+    Counts for the ledger's "at a glance" header. Real, queried numbers -
+    not decorative. `high_priority` is specifically open+in_progress
+    high-priority tickets (a resolved high-priority ticket isn't
+    something that still needs attention).
+    """
+    total = db.query(models.Ticket).count()
+    open_count = db.query(models.Ticket).filter(models.Ticket.status == models.TicketStatus.open).count()
+    in_progress = db.query(models.Ticket).filter(models.Ticket.status == models.TicketStatus.in_progress).count()
+    resolved = db.query(models.Ticket).filter(models.Ticket.status == models.TicketStatus.resolved).count()
+    high_priority_open = (
+        db.query(models.Ticket)
+        .filter(
+            models.Ticket.priority == models.TicketPriority.high,
+            models.Ticket.status != models.TicketStatus.resolved,
+        )
+        .count()
+    )
+    return {
+        "total": total,
+        "open": open_count,
+        "in_progress": in_progress,
+        "resolved": resolved,
+        "high_priority_open": high_priority_open,
+    }
+
+
 def update_status(db: Session, ticket_id: int, status: str) -> Optional[models.Ticket]:
     ticket = get_ticket(db, ticket_id)
     if ticket is None:

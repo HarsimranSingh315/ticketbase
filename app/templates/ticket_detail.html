@@ -46,10 +46,8 @@
 
 <section class="panel">
     <h2>Category</h2>
-    {% if ticket.category and ticket.category_confirmed %}
+    {% if ticket.category %}
         <div class="record">{{ ticket.category }}</div>
-    {% elif ticket.category %}
-        <p class="no-record">Suggested: {{ ticket.category }} — not yet confirmed</p>
     {% else %}
         <p class="no-record">No category confirmed yet</p>
     {% endif %}
