@@ -83,3 +83,15 @@ def setup_and_teardown():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture
+def db_session():
+    """Direct DB session bound to the shared in-memory test engine -
+    for tests that need to manipulate the database directly rather
+    than through the API (e.g. simulating a pre-existing DB state)."""
+    db = TestSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

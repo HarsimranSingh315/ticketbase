@@ -141,6 +141,21 @@ KB_ARTICLES = [
         ),
     },
     {
+        "title": "Laptop battery draining fast or not charging",
+        "category": "hardware",
+        "content": (
+            "A battery draining unusually fast is often a background "
+            "app or browser tab pinning the CPU, a display brightness "
+            "set too high, or a battery that has genuinely aged past "
+            "its usable cycle count. A battery not charging at all is "
+            "more likely a faulty cable, a dirty or damaged charging "
+            "port, or a power adapter that doesn't match the device's "
+            "wattage. Check battery health/cycle count in system "
+            "settings, try a different cable and outlet, and only "
+            "escalate to a hardware replacement once those are ruled out."
+        ),
+    },
+    {
         "title": "Feature request: dark mode",
         "category": "feature_request",
         "content": (

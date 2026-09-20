@@ -86,15 +86,42 @@ class RAGIndex:
         self.articles = articles
 
 
-def seed_knowledge_base(db: Session, embedder: Embedder) -> None:
+def seed_knowledge_base(db: Session, embedder: Embedder) -> bool:
     """
-    Populates knowledge_articles from KB_ARTICLES if the table is empty.
-    Idempotent - safe to call on every app startup.
-    """
-    if db.query(KnowledgeArticle).first() is not None:
-        return
+    Keeps knowledge_articles in sync with KB_ARTICLES. Idempotent - safe
+    to call on every app startup. Returns True if it reseeded (and thus
+    left `embedder` fitted on the full current corpus), False if the DB
+    was already in sync (and `embedder` was left untouched).
 
-    logger.info("Seeding knowledge base with %d articles", len(KB_ARTICLES))
+    Detects drift (the KB_ARTICLES list changed since this DB was last
+    seeded - e.g. an article was added) by comparing the set of titles,
+    and does a full delete + reseed when it differs, rather than only
+    seeding an empty table. Without this, adding a new KB article would
+    silently do nothing for anyone with an existing ticketbase.db - the
+    exact confusion that prompted this fix: a new battery-related
+    article was added to KB_ARTICLES, and a database seeded before that
+    change had no way to pick it up without a manual delete.
+
+    A full reseed (not an incremental upsert) is deliberate: each
+    article's stored embedding must come from an embedder fit on the
+    CURRENT full corpus, or old and new articles end up in different,
+    incomparable vector spaces. Refitting once across the whole set and
+    rewriting every row keeps that invariant simple and always true,
+    at the cost of KB_ARTICLES being the sole source of truth for this
+    table (nothing else writes to it, so nothing is lost).
+    """
+    existing_titles = {row.title for row in db.query(KnowledgeArticle.title).all()}
+    desired_titles = {a["title"] for a in KB_ARTICLES}
+
+    if existing_titles == desired_titles:
+        return False
+
+    logger.info(
+        "Knowledge base drift detected (have %d articles, want %d) - reseeding",
+        len(existing_titles), len(desired_titles),
+    )
+    db.query(KnowledgeArticle).delete()
+
     embedder.fit([a["content"] for a in KB_ARTICLES])
     for article in KB_ARTICLES:
         row = KnowledgeArticle(
@@ -105,6 +132,7 @@ def seed_knowledge_base(db: Session, embedder: Embedder) -> None:
         row.set_embedding(embedder.embed(article["content"]))
         db.add(row)
     db.commit()
+    return True
 
 
 def build_rag_index(db: Session) -> RAGIndex:
@@ -114,11 +142,11 @@ def build_rag_index(db: Session) -> RAGIndex:
     changes) - not per request.
     """
     embedder = Embedder()
+    reseeded = seed_knowledge_base(db, embedder)
     articles = db.query(KnowledgeArticle).all()
-    if not articles:
-        seed_knowledge_base(db, embedder)
-        articles = db.query(KnowledgeArticle).all()
-    else:
+    if not reseeded:
+        # DB was already in sync with KB_ARTICLES, so seed_knowledge_base
+        # left `embedder` unfitted - fit it now on the existing content.
         embedder.fit([a.content for a in articles])
 
     indexed = [
