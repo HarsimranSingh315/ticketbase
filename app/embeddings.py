@@ -17,6 +17,18 @@ swapping this out for real neural embeddings later (e.g. sentence-
 transformers, OpenAI/Anthropic embeddings, or a local ONNX model) is a
 change to this one file only - nothing in supportrag.py or main.py
 would need to change.
+
+Solver choice (this mattered in practice, not just in theory):
+scikit-learn's TruncatedSVD defaults to the "randomized" algorithm,
+which uses random projections and is fast for large matrices - but on
+a very small, sparse matrix like this 16-article KB, it produced
+`RuntimeWarning: divide by zero / overflow / invalid value in matmul`
+on at least one real machine (macOS, Python 3.9, a different BLAS
+backend than this project was developed against). "arpack" is an exact
+solver (via Lanczos iteration) rather than a randomized approximation,
+and is both more appropriate and more numerically stable for a matrix
+this small - it's used here specifically to avoid depending on a
+particular platform's BLAS behaving identically.
 """
 from __future__ import annotations
 
@@ -41,7 +53,7 @@ class Embedder:
 
     def __init__(self) -> None:
         self._vectorizer = TfidfVectorizer(stop_words="english", max_df=0.85)
-        self._svd = TruncatedSVD(n_components=N_COMPONENTS, random_state=42)
+        self._svd = TruncatedSVD(n_components=N_COMPONENTS, algorithm="arpack", random_state=42)
         self._fitted = False
 
     def fit(self, corpus: list[str]) -> None:
@@ -49,9 +61,22 @@ class Embedder:
         n_components = min(N_COMPONENTS, tfidf_matrix.shape[1] - 1, tfidf_matrix.shape[0] - 1)
         if n_components < 1:
             raise ValueError("Corpus too small to fit an embedding space.")
-        self._svd = TruncatedSVD(n_components=n_components, random_state=42)
+        self._svd = TruncatedSVD(n_components=n_components, algorithm="arpack", random_state=42)
         self._svd.fit(tfidf_matrix)
         self._fitted = True
+
+        # Defensive check: if a platform's BLAS still produces NaN/Inf
+        # despite the more stable solver above, fail loudly at startup
+        # rather than silently serving broken (NaN) similarity scores
+        # for every suggestion from then on.
+        sample = self._svd.transform(tfidf_matrix[:1])
+        if not np.all(np.isfinite(sample)):
+            raise RuntimeError(
+                "SVD fit produced non-finite values (NaN/Inf) - this "
+                "usually means a numerically unstable BLAS backend on "
+                "this platform. Try `pip install --upgrade numpy scipy "
+                "scikit-learn` to get a more recent, better-tested build."
+            )
 
     def embed(self, text: str) -> list[float]:
         if not self._fitted:
