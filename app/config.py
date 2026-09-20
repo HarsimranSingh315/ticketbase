@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Optional LLM step for SupportRAG's drafted response (see app/llm.py).
+    # Empty api_key = disabled (default) - the deterministic template in
+    # supportrag.py is used instead, exactly as before this feature
+    # existed. Defaults target Groq's free, no-credit-card tier
+    # (OpenAI-compatible API) - swapping to another OpenAI-compatible
+    # provider (OpenRouter, Cerebras, etc.) is just changing these three
+    # values, no code change. Free-tier model catalogs are known to
+    # change without notice, so a bad/decommissioned model name fails
+    # closed (falls back to the template) rather than breaking the
+    # feature - see app/llm.py.
+    llm_api_key: str = ""
+    llm_api_base: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "llama-3.3-70b-versatile"
+    llm_timeout_seconds: float = 8.0
+
 
 @lru_cache
 def get_settings() -> Settings:

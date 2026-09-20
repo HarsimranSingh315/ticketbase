@@ -64,3 +64,4 @@ class SuggestionOut(BaseModel):
     confidence: float
     sources: list[SuggestionSource] = []
     draft_response: str
+    draft_source: str = "template"

@@ -126,7 +126,8 @@ def suggest(ticket_id):
     click.echo("Sources:")
     for src in s["sources"]:
         click.echo(f"  - \"{src['title']}\" [{src['category']}]  similarity={src['similarity']}")
-    click.echo("\nDrafted response:")
+    source_label = "AI-written" if s.get("draft_source") == "llm" else "templated"
+    click.echo(f"\nDrafted response ({source_label}):")
     click.echo(s["draft_response"])
     click.echo(f"\nTo accept: python cli.py confirm-category {ticket_id} {s['category']}")
 

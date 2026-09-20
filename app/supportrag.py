@@ -33,9 +33,10 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import Settings
 from app.embeddings import Embedder, cosine_similarity
 from app.kb_articles import KB_ARTICLES
+from app.llm import generate_grounded_draft
 from app.models import KnowledgeArticle
 
 logger = logging.getLogger("ticketbase.supportrag")
@@ -56,6 +57,7 @@ class Suggestion:
     confidence: float
     sources: list[Source] = field(default_factory=list)
     draft_response: str = ""
+    draft_source: str = "template"  # "template" or "llm"
 
 
 @dataclass
@@ -135,9 +137,9 @@ class SupportRAGService:
     request without a performance cost.
     """
 
-    def __init__(self, index: RAGIndex):
+    def __init__(self, index: RAGIndex, settings: Settings):
         self.index = index
-        settings = get_settings()
+        self.settings = settings
         self.top_k = settings.rag_top_k
         self.confidence_threshold = settings.rag_confidence_threshold
 
@@ -179,11 +181,11 @@ class SupportRAGService:
         best_category = max(category_votes, key=category_votes.get)
 
         sources = [Source(a.id, a.title, a.category, round(s, 3)) for a, s in top]
-        draft = self._draft_response(top)
+        draft, draft_source = self._draft_response(top, description)
 
         logger.info(
-            "suggestion made ticket_id=%s category=%s confidence=%.3f sources=%s",
-            ticket_id, best_category, best_score, [a.id for a, _ in top],
+            "suggestion made ticket_id=%s category=%s confidence=%.3f sources=%s draft_source=%s",
+            ticket_id, best_category, best_score, [a.id for a, _ in top], draft_source,
         )
 
         return Suggestion(
@@ -192,10 +194,34 @@ class SupportRAGService:
             confidence=round(best_score, 3),
             sources=sources,
             draft_response=draft,
+            draft_source=draft_source,
         )
 
+    def _draft_response(
+        self, top: list[tuple[_IndexedArticle, float]], ticket_description: str,
+    ) -> tuple[str, str]:
+        """
+        Returns (draft_text, draft_source) where draft_source is "llm" or
+        "template". Tries the optional LLM rewrite first (see app/llm.py);
+        any failure there - disabled, network error, bad response - falls
+        back to the deterministic template so this never breaks the
+        suggestion feature, just potentially makes it plainer.
+        """
+        best_article, _ = top[0]
+
+        llm_draft = generate_grounded_draft(
+            settings=self.settings,
+            ticket_description=ticket_description,
+            source_title=best_article.title,
+            source_content=best_article.content,
+        )
+        if llm_draft:
+            return llm_draft, "llm"
+
+        return self._template_draft_response(top), "template"
+
     @staticmethod
-    def _draft_response(top: list[tuple[_IndexedArticle, float]]) -> str:
+    def _template_draft_response(top: list[tuple[_IndexedArticle, float]]) -> str:
         best_article, _ = top[0]
         other_titles = [a.title for a, _ in top[1:] if a.title != best_article.title]
         draft = f"Suggested response, based on \"{best_article.title}\":\n\n{best_article.content}"

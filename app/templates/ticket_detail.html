@@ -79,7 +79,7 @@
 
             {% if not suggestion.abstained %}
             <details class="disclosure">
-                <summary>Drafted response</summary>
+                <summary>Drafted response {% if suggestion.draft_source == 'llm' %}(AI-written, grounded in the source above){% else %}(templated from the source above){% endif %}</summary>
                 <pre class="draft-response">{{ suggestion.draft_response }}</pre>
             </details>
             {% endif %}

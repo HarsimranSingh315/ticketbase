@@ -273,6 +273,53 @@ prevents this bug from coming back, regardless of which Python version
 happens to be running the test suite - a comment or a one-off manual
 check wouldn't have.
 
+## Optional LLM-drafted responses (free tier)
+
+SupportRAG's drafted response can optionally be rewritten by a real
+LLM instead of the plain template - see `app/llm.py`. This is off by
+default (empty `LLM_API_KEY` = disabled, same pattern as `app/auth.py`)
+and, when off, behaves identically to before - every existing test
+still passes unmodified.
+
+**Why Groq, and why it's genuinely free:** researched current (2026)
+free-tier LLM APIs before picking one. Groq offers a free, no-credit-
+card developer tier (30 requests/minute, 14,400/day) over an OpenAI-
+compatible API, with several open-weight models (Llama 3.3 70B and
+others) available on it. `LLM_API_BASE`/`LLM_MODEL` are just config, so
+switching to another OpenAI-compatible free provider (OpenRouter,
+Cerebras) needs no code change.
+
+**What the LLM is and isn't allowed to do.** The prompt in `app/llm.py`
+is deliberately close-ended: rewrite this specific retrieved article
+for this specific ticket, using only what's in the article, under 120
+words, no invented facts. It never sees the category-selection step and
+is never called when retrieval abstained - the LLM can only change
+*wording*, never *what gets suggested or whether something gets
+suggested at all*. That split (retrieval decides; the LLM, if present,
+only rephrases) is what keeps the existing abstain/cite-sources
+guarantees intact regardless of whether the LLM step is even enabled.
+
+**Failure handling, actually tested against real failure, not just
+mocked ones.** Free-tier LLM catalogs are volatile in practice - while
+researching this, I found a documented case of a provider's free model
+list collapsing from a dozen entries to two within months. So every
+failure mode (timeout, non-200 status, malformed response, network
+unreachable) falls back to the existing template rather than breaking
+the suggestion endpoint. `tests/test_llm.py` covers this with mocked
+network responses (success, timeout, 404, malformed JSON, and the
+"never called on abstain" safety property) - and I additionally ran a
+real, unmocked call from this sandbox (whose network genuinely can't
+reach `api.groq.com`) and confirmed the exact same code path handles a
+real HTTP 403 from the egress proxy correctly: logs why, falls back,
+keeps the endpoint at 200. Both the mocked and the real-network
+evidence point the same way.
+
+**To actually try it:** get a free key at
+[console.groq.com](https://console.groq.com), set `LLM_API_KEY` in
+`.env`, restart the app. The UI's "Drafted response" disclosure will
+say "(AI-written, grounded in the source above)" instead of
+"(templated from the source above)" once it's working.
+
 ## Next steps
 
 - Swap `DATABASE_URL` to the Postgres URL and run `docker-compose up -d`

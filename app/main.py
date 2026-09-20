@@ -33,7 +33,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from app.config import get_settings
+from app.config import get_settings, Settings
 from app.database import engine, Base, get_db, SessionLocal
 from app import crud, schemas
 from app.auth import require_api_key
@@ -156,6 +156,7 @@ def suggest_ticket_category(
     request: Request, ticket_id: int,
     db: Session = Depends(get_db),
     rag_index: RAGIndex = Depends(get_rag_index),
+    rag_settings: Settings = Depends(get_settings),
 ):
     """
     SupportRAG (Project 2): returns a suggested category + drafted
@@ -166,7 +167,7 @@ def suggest_ticket_category(
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    rag = SupportRAGService(rag_index)
+    rag = SupportRAGService(rag_index, rag_settings)
     suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     return schemas.SuggestionOut(
         abstained=suggestion.abstained,
@@ -176,6 +177,7 @@ def suggest_ticket_category(
             article_id=s.article_id, title=s.title, category=s.category, similarity=s.similarity,
         ) for s in suggestion.sources],
         draft_response=suggestion.draft_response,
+        draft_source=suggestion.draft_source,
     )
 
 
@@ -251,11 +253,12 @@ def ui_suggest_category(
     request: Request, ticket_id: int,
     db: Session = Depends(get_db),
     rag_index: RAGIndex = Depends(get_rag_index),
+    rag_settings: Settings = Depends(get_settings),
 ):
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    rag = SupportRAGService(rag_index)
+    rag = SupportRAGService(rag_index, rag_settings)
     suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     return templates.TemplateResponse(
         request, "ticket_detail.html", {"ticket": ticket, "suggestion": suggestion}
