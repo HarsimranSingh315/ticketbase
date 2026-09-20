@@ -107,10 +107,75 @@ widely-documented pattern). Caught by actually loading the page and
 reading the real traceback, not by assuming the code was correct because
 it "looked standard."
 
-## Next steps (Project 2 preview)
+## Project 2: SupportRAG (now implemented)
 
-- Swap to Postgres (`docker-compose.yml` is ready)
-- Add `pgvector` for embeddings storage
-- Add a `SupportRAG` service that suggests (never auto-applies) a category
-  and drafts a response, with retrieval sources cited and an abstain path
-  when retrieval confidence is low
+Given a ticket, `SupportRAGService.suggest()` retrieves the most similar
+articles from a small seeded knowledge base (`app/kb_articles.py`),
+suggests a category, and drafts a response - citing exactly which
+articles it's based on and how similar each one was. It never writes to
+a ticket; `POST /tickets/{id}/suggest` is read-only, and applying a
+suggestion still requires the same explicit `PATCH /tickets/{id}/category`
+call as before (see `app/models.py` for why that's structurally
+enforced, not just a convention). Available via the API, the CLI
+(`python cli.py suggest <id>`), and the web UI (a "Get AI suggestion"
+button on each ticket's page).
+
+**Embeddings: TF-IDF + SVD, not a neural embedding model.** A real
+sentence-embedding model (sentence-transformers, OpenAI/Anthropic
+embeddings, etc.) needs a multi-hundred-MB deep learning stack and,
+usually, an external API call. For a small fixed knowledge base like
+this one, TF-IDF (word-frequency vectors) reduced with SVD gets
+meaningful semantic matching - e.g. "VPN will not connect" correctly
+retrieves the VPN and Wi-Fi articles over unrelated ones - with zero
+external dependencies or API costs. This was a deliberate, documented
+tradeoff (see `app/embeddings.py`), not a corner cut silently, and the
+`Embedder` class is the only thing that would need to change to swap in
+real neural embeddings later.
+
+**Postgres + pgvector: scaffolded, not required.** `docker-compose.yml`
+already provisions Postgres. `KnowledgeArticle.embedding` is stored as a
+JSON-encoded list of floats in a portable `Text` column rather than a
+native `pgvector` column, so the whole project still runs on plain
+SQLite with zero setup - see the docstring in `app/models.py` for
+exactly what the production swap to a native `Vector` column (and an
+indexed `ORDER BY embedding <=> query_embedding` instead of the Python
+`cosine_similarity()` loop in `embeddings.py`) would involve.
+
+**A known limitation, honestly:** with a 16-article knowledge base and
+TF-IDF's small vocabulary, similarity scores can be noisy for the
+lower-ranked matches - e.g. a VPN query's #3 source came back as a
+printer article at 0.84 similarity, purely from shared generic words
+like "check" and "connection". This didn't change the final category
+(the top two connectivity-related sources outweighed it), but it's a
+real limitation worth naming rather than hiding: TF-IDF matches
+vocabulary overlap, not true meaning, and a bigger/more diverse KB or
+real embeddings would reduce this noise.
+
+**A third debugging story, from writing this feature's tests:** running
+`test_tickets.py` and `test_supportrag.py` together failed with `no such
+table: tickets` - the exact same symptom as the original SQLite bug
+above, but a different cause. Each file defined its own
+`app.dependency_overrides[get_db] = override_get_db` at module import
+time. Pytest imports every test file before running any test, so
+whichever file was imported last silently overwrote the other's
+override for the entire session - meaning one file's requests could hit
+the other file's separate in-memory database, one that its own
+`create_all()` fixture had never touched. Fixed by moving the engine,
+session override, and `client` fixture into a single shared
+`tests/conftest.py`. See that file's docstring for the full writeup -
+this is a second genuine "found a real bug via a confusing failure,
+diagnosed the actual cause" story for an interview, distinct from the
+first one.
+
+## Next steps
+
+- Swap `DATABASE_URL` to the Postgres URL and run `docker-compose up -d`
+  to develop against Postgres instead of SQLite
+- Migrate `KnowledgeArticle.embedding` to a native `pgvector` column and
+  push similarity search into the database
+- Grow the knowledge base beyond 16 seed articles (ideally from real
+  resolved tickets) to reduce the TF-IDF noise described above
+- Optionally add a generative step (an LLM call) that rewrites the
+  drafted response in a more natural voice, while keeping the same
+  cited-sources-and-abstain-path structure - the retrieval layer this
+  version built is what makes that safe to add later

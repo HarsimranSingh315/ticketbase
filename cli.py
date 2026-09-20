@@ -102,5 +102,34 @@ def confirm_category(ticket_id, category):
     _print_ticket(resp.json())
 
 
+@cli.command()
+@click.argument("ticket_id", type=int)
+def suggest(ticket_id):
+    """
+    Get a SupportRAG category suggestion + drafted response for a
+    ticket. Read-only - does NOT confirm anything. Run
+    'confirm-category' afterwards if you agree with the suggestion.
+    """
+    resp = requests.post(f"{API_BASE}/tickets/{ticket_id}/suggest")
+    if resp.status_code == 404:
+        click.echo(f"Ticket #{ticket_id} not found.")
+        return
+    resp.raise_for_status()
+    s = resp.json()
+
+    if s["abstained"]:
+        click.echo(f"SupportRAG abstained (confidence {s['confidence']}) — no confident match.")
+        click.echo(s["draft_response"])
+        return
+
+    click.echo(f"Suggested category: {s['category']}  (confidence {s['confidence']})")
+    click.echo("Sources:")
+    for src in s["sources"]:
+        click.echo(f"  - \"{src['title']}\" [{src['category']}]  similarity={src['similarity']}")
+    click.echo("\nDrafted response:")
+    click.echo(s["draft_response"])
+    click.echo(f"\nTo accept: python cli.py confirm-category {ticket_id} {s['category']}")
+
+
 if __name__ == "__main__":
     cli()

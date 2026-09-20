@@ -45,4 +45,38 @@
     <p class="hint-text">Confirming here is the same human-review step the CLI's <code>confirm-category</code> command performs — nothing sets a category automatically.</p>
 </section>
 
+<section class="card">
+    <h3>SupportRAG suggestion</h3>
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/suggest" class="inline-form">
+        <button type="submit">Get AI suggestion</button>
+    </form>
+
+    {% if suggestion %}
+        {% if suggestion.abstained %}
+            <p class="muted">SupportRAG abstained — confidence {{ suggestion.confidence }} is below the threshold, so no category is suggested. {{ suggestion.draft_response }}</p>
+        {% else %}
+            <p>Suggested category: <strong>{{ suggestion.category }}</strong> (confidence {{ suggestion.confidence }})</p>
+            <p class="hint-text">This is a suggestion only. Use the "Confirm category" form above to accept or override it — nothing here writes to the ticket automatically.</p>
+        {% endif %}
+
+        {% if suggestion.sources %}
+            <details>
+                <summary>Sources this suggestion is based on</summary>
+                <ul>
+                {% for s in suggestion.sources %}
+                    <li>"{{ s.title }}" — category: {{ s.category }}, similarity: {{ s.similarity }}</li>
+                {% endfor %}
+                </ul>
+            </details>
+        {% endif %}
+
+        {% if not suggestion.abstained %}
+            <details>
+                <summary>Drafted response</summary>
+                <pre class="draft-response">{{ suggestion.draft_response }}</pre>
+            </details>
+        {% endif %}
+    {% endif %}
+</section>
+
 {% endblock %}

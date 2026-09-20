@@ -43,3 +43,24 @@ class TicketOut(BaseModel):
     status: TicketStatus
     priority: TicketPriority
     created_at: datetime
+
+
+class SuggestionSource(BaseModel):
+    """One knowledge-base article a suggestion was based on."""
+    article_id: int
+    title: str
+    category: str
+    similarity: float
+
+
+class SuggestionOut(BaseModel):
+    """
+    What SupportRAG returns for a ticket. Deliberately never includes
+    any field that could be mistaken for an already-applied category -
+    the caller must still call PATCH /tickets/{id}/category to apply it.
+    """
+    abstained: bool
+    category: Optional[str] = None
+    confidence: float
+    sources: list[SuggestionSource] = []
+    draft_response: str

@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from app.database import engine, Base, get_db
 from app import crud, schemas
+from app.supportrag import SupportRAGService
 
 # Creates the tickets table if it doesn't exist yet. Fine for Week 1;
 # once this is a "real" project, you'd use Alembic migrations instead
@@ -70,6 +71,32 @@ def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfi
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     return ticket
+
+
+@app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut)
+def suggest_ticket_category(ticket_id: int, db: Session = Depends(get_db)):
+    """
+    SupportRAG (Project 2): returns a suggested category + drafted
+    response, with cited sources and a confidence score. This is a
+    read-only, suggest-only endpoint - it never writes to the ticket.
+    To apply a suggestion, the caller (human, via the UI or CLI) still
+    has to call PATCH /tickets/{id}/category explicitly, same as if
+    they'd typed the category in from scratch.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    rag = SupportRAGService(db)
+    suggestion = rag.suggest(ticket.description)
+    return schemas.SuggestionOut(
+        abstained=suggestion.abstained,
+        category=suggestion.category,
+        confidence=suggestion.confidence,
+        sources=[schemas.SuggestionSource(
+            article_id=s.article_id, title=s.title, category=s.category, similarity=s.similarity,
+        ) for s in suggestion.sources],
+        draft_response=suggestion.draft_response,
+    )
 
 
 @app.get("/health")
@@ -129,6 +156,24 @@ def ui_ticket_detail(request: Request, ticket_id: int, db: Session = Depends(get
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     return templates.TemplateResponse(
         request, "ticket_detail.html", {"ticket": ticket}
+    )
+
+
+@app.post("/ui/tickets/{ticket_id}/suggest")
+def ui_suggest_category(request: Request, ticket_id: int, db: Session = Depends(get_db)):
+    """
+    Web UI entry point for SupportRAG. Same suggest-only guarantee as
+    the JSON endpoint above: this route never writes to the ticket, it
+    just renders the suggestion on the page for a human to accept
+    (via the existing category-confirm form) or ignore.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    rag = SupportRAGService(db)
+    suggestion = rag.suggest(ticket.description)
+    return templates.TemplateResponse(
+        request, "ticket_detail.html", {"ticket": ticket, "suggestion": suggestion}
     )
 
 

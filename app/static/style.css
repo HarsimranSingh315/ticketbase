@@ -112,3 +112,13 @@ header h1 a { color: #1a1a1a; text-decoration: none; }
     margin-bottom: 10px;
     font-size: 13px;
 }
+
+.draft-response {
+    white-space: pre-wrap;
+    background: #f7f7f7;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-family: inherit;
+}
