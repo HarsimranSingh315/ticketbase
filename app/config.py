@@ -106,6 +106,17 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_phone_number: str = ""
 
+    # SLA timers. Deadline = ticket.created_at + the hours for its
+    # priority. Deliberately simple (one clock per priority, not
+    # business-hours-aware or pausable) - a real production SLA engine
+    # would need those refinements, but this gives a genuine, useful
+    # "is this overdue" signal without that complexity.
+    sla_high_priority_hours: float = 4.0
+    sla_medium_priority_hours: float = 24.0
+    sla_low_priority_hours: float = 72.0
+    # Poll interval for sla_check.py's continuous mode (see that file).
+    sla_check_poll_interval_seconds: float = 60.0
+
 
 @lru_cache
 def get_settings() -> Settings:

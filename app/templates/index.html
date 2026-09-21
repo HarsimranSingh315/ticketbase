@@ -42,10 +42,11 @@
 <section class="panel">
     <div class="list-controls">
         <div class="tabs">
-            <a href="/{{ '?q=' + current_q if current_q }}" class="{{ 'active' if not current_status else '' }}">All</a>
+            <a href="/{{ '?q=' + current_q if current_q }}" class="{{ 'active' if not current_status and not current_sla else '' }}">All</a>
             <a href="/?status=open{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
             <a href="/?status=in_progress{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
             <a href="/?status=resolved{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+            <a href="/?sla=breached" class="{{ 'active tabs-breached' if current_sla == 'breached' else 'tabs-breached' }}">Needs attention{% if breached_ids %} ({{ breached_ids|length }}){% endif %}</a>
         </div>
         <form method="get" action="/" class="search-form">
             {% if current_status %}<input type="hidden" name="status" value="{{ current_status }}">{% endif %}
@@ -74,13 +75,16 @@
                     </td>
                     <td class="ledger-meta">
                         <span class="tag tag-status-{{ t.status.value }}">{{ t.status.value|replace('_', ' ') }}</span>
+                        {% if t.id in breached_ids %}<span class="tag tag-breached">Overdue</span>{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     {% else %}
-        {% if current_q %}
+        {% if current_sla == 'breached' %}
+            <p class="empty-state">Nothing overdue — every open ticket is within its SLA window.</p>
+        {% elif current_q %}
             <p class="empty-state">No tickets match "{{ current_q }}".</p>
         {% else %}
             <p class="empty-state">Nothing logged yet — describe an issue above to open the first ticket.</p>

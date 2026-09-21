@@ -947,3 +947,75 @@ def get_reports_data(db: Session) -> dict:
         "average_resolution_hours": get_average_resolution_hours(db),
         "agent_workload": get_agent_workload(db),
     }
+
+
+# --- SLA timers & escalation ---
+
+def compute_sla_deadline(ticket: models.Ticket, sla_hours: dict) -> datetime:
+    """The deadline is always ticket.created_at + the hours configured
+    for its priority - deliberately simple (not business-hours-aware,
+    not pausable while waiting on the customer). `sla_hours` is a plain
+    dict ({"high": 4.0, "medium": 24.0, "low": 72.0}), not a Settings
+    object - keeps this module decoupled from app.config, matching how
+    every other config-dependent crud function (e.g. create_session's
+    ttl_hours) takes plain values, not the settings object itself."""
+    hours = sla_hours[ticket.priority.value]
+    return ticket.created_at + timedelta(hours=hours)
+
+
+def is_ticket_breached(ticket: models.Ticket, sla_hours: dict, now: Optional[datetime] = None) -> bool:
+    """A resolved ticket is never "breached" in the active sense, no
+    matter how late it was resolved - this is about what still needs
+    attention right now, not a historical compliance record (which
+    would be a different, not-yet-built report)."""
+    if ticket.status.value == "resolved":
+        return False
+    now = now or _utcnow()
+    return now > compute_sla_deadline(ticket, sla_hours)
+
+
+def list_breached_tickets(db: Session, sla_hours: dict) -> list[models.Ticket]:
+    """Every currently-overdue, still-open ticket, most overdue first -
+    the "needs attention" view."""
+    candidates = db.query(models.Ticket).filter(models.Ticket.status != models.TicketStatus.resolved).all()
+    now = _utcnow()
+    breached = [(t, compute_sla_deadline(t, sla_hours)) for t in candidates]
+    breached = [(t, deadline) for t, deadline in breached if now > deadline]
+    breached.sort(key=lambda pair: pair[1])
+    return [t for t, _ in breached]
+
+
+def record_new_sla_breaches(db: Session, sla_hours: dict) -> int:
+    """
+    Finds tickets that are breached AND don't already have a
+    `ticket.sla_breached` audit event, and logs one for each - this is
+    what sla_check.py calls on every poll cycle. Idempotent by design:
+    checking for an existing event before logging a new one is what
+    makes it safe to call this every minute forever without spamming
+    the audit trail with the same breach over and over. Returns how
+    many NEW breaches were recorded this call (0 most of the time - a
+    ticket usually breaches once, gets noticed, and gets worked, not
+    re-breaches on every poll).
+    """
+    breached_tickets = list_breached_tickets(db, sla_hours)
+    newly_recorded = 0
+    for ticket in breached_tickets:
+        already_logged = (
+            db.query(AuditEvent)
+            .filter(
+                AuditEvent.resource_type == "ticket",
+                AuditEvent.resource_id == ticket.id,
+                AuditEvent.action == "ticket.sla_breached",
+            )
+            .first()
+        )
+        if already_logged is not None:
+            continue
+        _record_audit_event(
+            db, actor_user_id=None, action="ticket.sla_breached", resource_type="ticket",
+            resource_id=ticket.id, details={"priority": ticket.priority.value},
+        )
+        newly_recorded += 1
+    if newly_recorded:
+        db.commit()
+    return newly_recorded

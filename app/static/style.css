@@ -251,6 +251,14 @@ textarea:focus-visible, select:focus-visible {
     border-bottom: 2px solid transparent;
 }
 .tabs a.active { color: var(--ink); border-bottom-color: var(--pine); font-weight: 600; }
+.tabs a.tabs-breached { color: var(--brick); }
+.tabs a.tabs-breached.active { border-bottom-color: var(--brick); }
+
+.tag-breached {
+    color: var(--brick);
+    border-color: var(--brick);
+    margin-left: 4px;
+}
 
 .list-controls {
     display: flex;

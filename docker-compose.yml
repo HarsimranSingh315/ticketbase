@@ -69,5 +69,23 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Periodic SLA breach checker (see sla_check.py) - deliberately a
+  # SEPARATE process/service from `worker`, not folded into it: this is
+  # a time-based periodic scan, not queue-based job processing, and
+  # keeping them apart means each one's polling interval is
+  # independently tunable.
+  sla_check:
+    build: .
+    command: ["python", "sla_check.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://ticketbase:ticketbase@postgres:5432/ticketbase
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   ticketbase_pgdata:

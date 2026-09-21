@@ -17,6 +17,13 @@
         <li><b>{{ ticket.status.value|replace('_', ' ')|capitalize }}</b></li>
         <li>Opened {{ ticket.created_at.strftime('%b %-d, %Y') }} at {{ ticket.created_at.strftime('%H:%M') }} UTC</li>
         {% if assignee %}<li>Assigned to <b>{{ assignee.name }}</b></li>{% endif %}
+        {% if ticket.status.value != 'resolved' %}
+            {% if sla_breached %}
+                <li style="color: var(--brick);"><b>Overdue</b> — SLA deadline was {{ sla_deadline.strftime('%b %-d, %Y at %H:%M') }} UTC</li>
+            {% else %}
+                <li>SLA deadline: {{ sla_deadline.strftime('%b %-d, %Y at %H:%M') }} UTC</li>
+            {% endif %}
+        {% endif %}
     </ul>
 </section>
 

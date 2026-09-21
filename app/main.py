@@ -496,16 +496,29 @@ def accept_invite_submit(
 
 @app.get("/")
 def ui_index(
-    request: Request, status: Optional[str] = None, q: Optional[str] = None,
+    request: Request, status: Optional[str] = None, q: Optional[str] = None, sla: Optional[str] = None,
     db: Session = Depends(get_db), user: User = Depends(require_agent),
     settings: Settings = Depends(get_settings),
 ):
-    tickets = crud.list_tickets(db, status=status, q=q, limit=settings.max_page_size)
+    sla_hours = {"high": settings.sla_high_priority_hours, "medium": settings.sla_medium_priority_hours, "low": settings.sla_low_priority_hours}
+
+    if sla == "breached":
+        # A computed view, not a status filter - overdue tickets across
+        # every non-resolved status, most overdue first. Ignores the
+        # status/q filters deliberately: "what needs attention right
+        # now" is a different question than "show me open tickets".
+        tickets = crud.list_breached_tickets(db, sla_hours)
+        breached_ids = {t.id for t in tickets}
+    else:
+        tickets = crud.list_tickets(db, status=status, q=q, limit=settings.max_page_size)
+        breached_ids = {t.id for t in crud.list_breached_tickets(db, sla_hours)}
+
     stats = crud.get_ticket_stats(db)
     return templates.TemplateResponse(
         request, "index.html",
         {
-            "tickets": tickets, "current_status": status, "current_q": q, "stats": stats,
+            "tickets": tickets, "current_status": status, "current_q": q, "current_sla": sla,
+            "stats": stats, "breached_ids": breached_ids,
             "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )
@@ -519,12 +532,16 @@ def ui_create_ticket(request: Request, description: str = Form(...), db: Session
         error_messages = [err["msg"].removeprefix("Value error, ") for err in exc.errors()]
         tickets = crud.list_tickets(db)
         stats = crud.get_ticket_stats(db)
+        sla_hours = {"high": settings.sla_high_priority_hours, "medium": settings.sla_medium_priority_hours, "low": settings.sla_low_priority_hours}
+        breached_ids = {t.id for t in crud.list_breached_tickets(db, sla_hours)}
         return templates.TemplateResponse(
             request,
             "index.html",
             {
                 "tickets": tickets,
                 "current_status": None,
+                "current_sla": None,
+                "breached_ids": breached_ids,
                 "form_error": "; ".join(error_messages),
                 "submitted_description": description,
                 "stats": stats,
@@ -574,6 +591,9 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
                 audit_actors[actor.id] = actor
     messages = crud.list_messages_for_ticket(db, ticket.id)
     message_jobs = {m.id: crud.get_outbox_job_for_message(db, m.id) for m in messages}
+    sla_hours = {"high": settings.sla_high_priority_hours, "medium": settings.sla_medium_priority_hours, "low": settings.sla_low_priority_hours}
+    sla_deadline = crud.compute_sla_deadline(ticket, sla_hours)
+    sla_breached = crud.is_ticket_breached(ticket, sla_hours)
     return {
         "ticket": ticket, "related_tickets": related_tickets, "user": user,
         "csrf_token": csrf_token_for_template(request, settings),
@@ -581,6 +601,7 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
         "audit_events": audit_events, "audit_actors": audit_actors,
         "suggestion": suggestion, "conflict_error": conflict_error,
         "messages": messages, "message_jobs": message_jobs,
+        "sla_deadline": sla_deadline, "sla_breached": sla_breached,
     }
 
 

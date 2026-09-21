@@ -901,3 +901,83 @@ Per the ongoing local-build focus: reporting/analytics, SLA/escalation
 timers, or outbound calling (Twilio's REST API to place a call, distinct
 from the webhook-receiving side already built) - all real, all
 buildable and testable without needing a public deployment.
+
+---
+
+## SLA timers & escalation
+
+### What was built
+
+- SLA deadline = `ticket.created_at` + configurable hours for its
+  priority (`SLA_HIGH_PRIORITY_HOURS` etc.) - deliberately simple, not
+  business-hours-aware or pausable. A real production SLA engine would
+  need those refinements; this gives a genuine, useful "is this overdue"
+  signal without that added complexity.
+- `sla_check.py`: a **separate process from `worker.py`**, not a
+  variant of it - deliberately, since it's a fundamentally different
+  pattern (time-based periodic re-scan of all open tickets, not
+  queue-based job claiming). Idempotent: `crud.record_new_sla_breaches`
+  checks for an existing `ticket.sla_breached` audit event before
+  logging a new one, so polling every minute forever never spams the
+  same breach twice.
+- UI: a "Needs attention" tab on the ticket ledger showing a live
+  breach count, an "Overdue" indicator on breached rows, an SLA
+  deadline line on the ticket detail page (or an "Overdue" callout with
+  the missed deadline, styled distinctly). A resolved ticket shows no
+  SLA line at all - it's not "breached" retroactively just because it
+  took a while, that's a different (not-yet-built) historical-
+  compliance question.
+
+### Full manual end-to-end verification, including a real subprocess
+
+Matching the standard `worker.py` set: created a high-priority ticket,
+backdated it 5 hours (past its 4-hour SLA), confirmed the "Needs
+attention (1)" tab, the "Overdue" row indicator, the filtered
+`/?sla=breached` view, and the ticket detail page's overdue callout all
+rendered correctly - then ran `sla_check.py --once` as a **genuinely
+separate subprocess** (not a function call inside a test), confirmed it
+logged the audit event, then ran it again and confirmed zero new
+breaches were recorded - real idempotency, not assumed.
+
+### Test suite
+
+```
+$ python -m pytest -q
+145 passed, 2 warnings
+```
+
+14 new tests in `tests/test_sla.py` (deadline computation per priority,
+resolved-tickets-never-breached regardless of age, before/after
+deadline boundaries, sort order, audit trail idempotency, the
+`sla_check.py` subprocess pattern with the same `SessionLocal`-pointed-
+at-test-DB fix `worker.py`'s tests needed, and every UI state). Full
+suite re-verified against real Postgres - all 145 pass there too.
+
+`docker-compose.yml` gained a fifth service, `sla_check`, running
+`python sla_check.py` continuously alongside `worker` - same honest
+"unrun in this sandbox, no Docker daemon" caveat as every other
+Docker-related claim in this document.
+
+### Known limitations, stated plainly
+
+- Not business-hours-aware (a ticket filed Friday evening "burns" SLA
+  hours over the weekend the same as during business hours).
+- Not pausable while waiting on the customer - a real support tool
+  usually stops the clock when the ball is in the customer's court;
+  this doesn't distinguish that from the agent just not having gotten
+  to it yet.
+- No historical SLA-compliance reporting (e.g. "% of tickets resolved
+  within SLA last month") - only the live "is this currently overdue"
+  signal exists; that's a genuinely different report from what's built
+  in the Reporting/analytics section above.
+- No notification (email/etc.) on breach - the audit trail records it,
+  but nothing currently alerts a human proactively. Given the outbox
+  infrastructure already exists (Milestone 2), wiring an escalation
+  email would be a natural, bounded follow-up - deliberately not built
+  here to avoid an unrequested product decision (who should receive it?
+  the assignee? an admin? configurable?).
+
+### Next milestone
+
+Outbound calling (Twilio's REST API to actually place a call) is the
+last of the three features requested together in this round.
