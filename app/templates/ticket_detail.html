@@ -34,7 +34,9 @@
 
 <section class="panel">
     <h2>Status</h2>
+    {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets/{{ ticket.id }}/status" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <select name="status">
             <option value="open" {{ 'selected' if ticket.status.value == 'open' }}>Open</option>
             <option value="in_progress" {{ 'selected' if ticket.status.value == 'in_progress' }}>In progress</option>
@@ -42,6 +44,7 @@
         </select>
         <button type="submit" class="btn btn-quiet">Update status</button>
     </form>
+    {% endif %}
 </section>
 
 <section class="panel">
@@ -51,11 +54,14 @@
     {% else %}
         <p class="no-record">No category confirmed yet</p>
     {% endif %}
+    {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets/{{ ticket.id }}/category" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="text" name="category" placeholder="e.g. connectivity, billing, hardware" required>
         <button type="submit" class="btn btn-quiet">Confirm category</button>
     </form>
     <p class="hint">Confirming here does the same thing as the CLI's <code>confirm-category</code> command — nothing sets a category on its own.</p>
+    {% endif %}
 </section>
 
 <section class="panel">

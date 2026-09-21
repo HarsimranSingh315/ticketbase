@@ -49,11 +49,11 @@ def test_related_tickets_on_nonexistent_ticket_returns_404(client):
     assert resp.status_code == 404
 
 
-def test_ticket_detail_page_shows_related_tickets(client):
-    t1 = client.post("/tickets", json={"description": "My VPN will not connect from home"}).json()
-    client.post("/tickets", json={"description": "VPN keeps disconnecting, cannot reach the office network"})
+def test_ticket_detail_page_shows_related_tickets(admin_client):
+    t1 = admin_client.post("/tickets", json={"description": "My VPN will not connect from home"}).json()
+    admin_client.post("/tickets", json={"description": "VPN keeps disconnecting, cannot reach the office network"})
 
-    resp = client.get(f"/ui/tickets/{t1['id']}")
+    resp = admin_client.get(f"/ui/tickets/{t1['id']}")
     assert resp.status_code == 200
     assert "Related tickets" in resp.text
     assert "VPN keeps disconnecting" in resp.text

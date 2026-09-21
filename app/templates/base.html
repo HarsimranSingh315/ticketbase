@@ -17,6 +17,15 @@
                 <a href="/" class="wordmark">TicketBase</a>
                 <p class="tagline">Support ticket ledger</p>
             </div>
+            {% if user %}
+            <div class="user-bar">
+                <span class="user-name">{{ user.name }} <span class="user-role">({{ user.role.value }})</span></span>
+                {% if user.role.value == 'admin' %}<a href="/invite" class="user-link">Invite agent</a>{% endif %}
+                <form method="post" action="/logout" class="inline-form">
+                    <button type="submit" class="link-button">Log out</button>
+                </form>
+            </div>
+            {% endif %}
         </header>
         <main>
             {% block content %}{% endblock %}

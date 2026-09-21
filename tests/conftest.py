@@ -78,6 +78,16 @@ def setup_and_teardown():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+    # slowapi's in-memory rate-limit storage persists across the whole
+    # pytest process, not per-test - without resetting it, tests that
+    # log in repeatedly (each with its own admin_client/agent_client/
+    # reviewer_client fixture) eventually trip the real login rate
+    # limit and fail with 429, which looks like a login bug but isn't
+    # one. Found by running the full auth test file together (each
+    # test passed in isolation) - the same class of "only fails
+    # together" issue as the cross-file dependency_overrides bug this
+    # file's own docstring describes, different mechanism.
+    app.state.limiter.reset()
 
 
 @pytest.fixture
@@ -95,3 +105,68 @@ def db_session():
         yield db
     finally:
         db.close()
+
+
+# --- Agent auth fixtures (Milestone 1) ---
+#
+# Tests never run the app's real `lifespan`, so the startup bootstrap-
+# admin mechanism (app/main.py's _bootstrap_admin_if_needed) never runs
+# here either - see override_get_rag_index's docstring above for the
+# same reasoning applied to a different piece of startup. These
+# fixtures create a real admin/agent user directly, the same way the
+# bootstrap mechanism would, so tests can exercise the now-protected
+# UI routes without re-deriving login from scratch every time.
+
+TEST_ADMIN_EMAIL = "test-admin@example.com"
+TEST_ADMIN_PASSWORD = "test-admin-password-123"
+TEST_AGENT_EMAIL = "test-agent@example.com"
+TEST_AGENT_PASSWORD = "test-agent-password-123"
+TEST_REVIEWER_EMAIL = "test-reviewer@example.com"
+TEST_REVIEWER_PASSWORD = "test-reviewer-password-123"
+
+
+@pytest.fixture
+def admin_client(client, db_session):
+    """A TestClient already logged in as a real admin user."""
+    from app import crud as _crud
+    from app.models import UserRole
+    _crud.create_user(db_session, email=TEST_ADMIN_EMAIL, name="Test Admin", password=TEST_ADMIN_PASSWORD, role=UserRole.admin)
+    resp = client.post("/login", data={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD})
+    assert resp.status_code in (200, 303), f"admin login failed in fixture: {resp.status_code}"
+    return client
+
+
+@pytest.fixture
+def agent_client(client, db_session):
+    """A TestClient already logged in as a real agent (non-admin) user."""
+    from app import crud as _crud
+    from app.models import UserRole
+    _crud.create_user(db_session, email=TEST_AGENT_EMAIL, name="Test Agent", password=TEST_AGENT_PASSWORD, role=UserRole.agent)
+    resp = client.post("/login", data={"email": TEST_AGENT_EMAIL, "password": TEST_AGENT_PASSWORD})
+    assert resp.status_code in (200, 303), f"agent login failed in fixture: {resp.status_code}"
+    return client
+
+
+@pytest.fixture
+def reviewer_client(client, db_session):
+    """A TestClient already logged in as a read-only reviewer."""
+    from app import crud as _crud
+    from app.models import UserRole
+    _crud.create_user(db_session, email=TEST_REVIEWER_EMAIL, name="Test Reviewer", password=TEST_REVIEWER_PASSWORD, role=UserRole.reviewer)
+    resp = client.post("/login", data={"email": TEST_REVIEWER_EMAIL, "password": TEST_REVIEWER_PASSWORD})
+    assert resp.status_code in (200, 303), f"reviewer login failed in fixture: {resp.status_code}"
+    return client
+
+
+def get_csrf_token(authed_client, path="/"):
+    """
+    Scrapes the csrf_token hidden field out of a real rendered page,
+    rather than recomputing the HMAC independently in the test - this
+    way a test verifies the actual value the app produces, not a
+    parallel implementation that could drift from it and stay green.
+    """
+    import re
+    resp = authed_client.get(path)
+    match = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
+    assert match, f"No csrf_token field found on {path} (status {resp.status_code})"
+    return match.group(1)

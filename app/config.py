@@ -52,6 +52,32 @@ class Settings(BaseSettings):
     llm_model: str = "openai/gpt-oss-20b"
     llm_timeout_seconds: float = 8.0
 
+    # Session-based agent auth (Milestone 1). SECRET_KEY signs CSRF
+    # tokens - if left blank, a random one is generated at process
+    # startup as a dev convenience, logged as a clear warning since it
+    # means sessions won't survive a restart and won't be consistent
+    # across multiple processes. Set a real SECRET_KEY for anything
+    # beyond a single local dev process.
+    secret_key: str = ""
+    session_ttl_hours: int = 12
+    invite_ttl_hours: int = 72
+    login_rate_limit: str = "10/minute"
+    # False for local http:// dev (the default). MUST be true in any real
+    # deployment served over HTTPS - a session cookie sent over plain
+    # HTTP can be intercepted. Not auto-detected because this process
+    # has no reliable way to know if it's behind a TLS-terminating proxy.
+    session_cookie_secure: bool = False
+
+    # Bootstrap: since account creation is invite-only (no open signup),
+    # something has to create the very first admin. If both of these are
+    # set AND no users exist yet in the database, the app creates this
+    # one admin account at startup. Leave blank after first use - this
+    # is a one-time bootstrap mechanism, not a standing backdoor (it
+    # only ever acts when the users table is completely empty).
+    bootstrap_admin_email: str = ""
+    bootstrap_admin_password: str = ""
+    bootstrap_admin_name: str = "Admin"
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -60,4 +86,16 @@ def get_settings() -> Settings:
     per process, not on every request. Tests override this via
     app.dependency_overrides[get_settings], same pattern as get_db.
     """
-    return Settings()
+    settings = Settings()
+    if not settings.secret_key:
+        import logging
+        import secrets as _secrets
+        settings.secret_key = _secrets.token_urlsafe(32)
+        logging.getLogger("ticketbase").warning(
+            "SECRET_KEY not set - generated a random one for this process only. "
+            "CSRF tokens will stop validating across a restart, and this is NOT "
+            "safe if you ever run more than one process (they'd each get a "
+            "different key). Set SECRET_KEY in .env for anything beyond a "
+            "single local dev process."
+        )
+    return settings

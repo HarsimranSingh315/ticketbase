@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Set up your account — TicketBase{% endblock %}
+
+{% block content %}
+<div class="auth-shell">
+    <div class="auth-card">
+        <h1>Set up your account</h1>
+        {% if error %}
+        <div class="error-banner">{{ error }}</div>
+        {% endif %}
+        {% if invite %}
+        <p style="font-size: 13px; color: var(--ink-muted); margin-top: -10px;">
+            Setting up <strong>{{ invite.email }}</strong> as a {{ invite.role.value }}.
+        </p>
+        <form method="post" action="/accept-invite">
+            <input type="hidden" name="token" value="{{ token }}">
+            <label for="name">Your name</label>
+            <input type="text" id="name" name="name" required autofocus>
+            <label for="password">Choose a password</label>
+            <input type="password" id="password" name="password" required minlength="8">
+            <button type="submit" class="btn">Create account</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

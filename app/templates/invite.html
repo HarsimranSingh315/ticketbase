@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Invite an agent — TicketBase{% endblock %}
+
+{% block content %}
+<a href="/" class="back-link">← All tickets</a>
+
+<section class="panel">
+    <h2>Invite an agent</h2>
+    {% if error %}
+    <div class="error-banner">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/invite" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="email" name="email" placeholder="agent@example.com" required>
+        <select name="role">
+            <option value="agent">Agent</option>
+            <option value="reviewer">Reviewer (read-only)</option>
+            <option value="admin">Admin</option>
+        </select>
+        <button type="submit" class="btn btn-quiet">Create invite</button>
+    </form>
+    <p class="hint">
+        No email system exists yet, so the invite link below is shown directly
+        instead of being sent automatically — copy it and share it with the
+        person you're inviting yourself. The link expires and can only be used once.
+    </p>
+
+    {% if invite_link %}
+    <div class="invite-link-box">{{ invite_link }}</div>
+    {% endif %}
+</section>
+{% endblock %}

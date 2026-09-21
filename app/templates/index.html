@@ -28,10 +28,15 @@
     {% if form_error %}
     <div class="error-banner">{{ form_error }}</div>
     {% endif %}
+    {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets" class="log-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <textarea name="description" rows="2" placeholder="Describe the issue…" required>{{ submitted_description or '' }}</textarea>
         <button type="submit" class="btn">Log ticket</button>
     </form>
+    {% else %}
+    <p class="hint">You're signed in as a reviewer (read-only) — logging tickets requires an agent or admin role.</p>
+    {% endif %}
 </section>
 
 <section class="panel">
