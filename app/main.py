@@ -241,7 +241,7 @@ def ui_index(request: Request, status: Optional[str] = None, q: Optional[str] = 
     )
 
 
-@app.post("/ui/tickets")
+@app.post("/ui/tickets", dependencies=[Depends(require_api_key)])
 def ui_create_ticket(request: Request, description: str = Form(...), db: Session = Depends(get_db)):
     try:
         validated = schemas.TicketCreate(description=description)
@@ -302,7 +302,7 @@ def ui_suggest_category(
     )
 
 
-@app.post("/ui/tickets/{ticket_id}/status")
+@app.post("/ui/tickets/{ticket_id}/status", dependencies=[Depends(require_api_key)])
 def ui_update_status(ticket_id: int, status: str = Form(...), db: Session = Depends(get_db)):
     ticket = crud.update_status(db, ticket_id, status)
     if ticket is None:
@@ -310,7 +310,7 @@ def ui_update_status(ticket_id: int, status: str = Form(...), db: Session = Depe
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
-@app.post("/ui/tickets/{ticket_id}/category")
+@app.post("/ui/tickets/{ticket_id}/category", dependencies=[Depends(require_api_key)])
 def ui_confirm_category(ticket_id: int, category: str = Form(...), db: Session = Depends(get_db)):
     ticket = crud.confirm_category(db, ticket_id, category)
     if ticket is None:

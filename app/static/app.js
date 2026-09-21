@@ -1,45 +1,82 @@
 // TicketBase — progressive enhancement only. Every page works with
 // this file absent or failing: the "Suggest a category" form already
-// works as a normal POST (see ticket_detail.html). This script's only
-// job is to avoid a frozen-looking page while the LLM step (if
-// enabled) is thinking, which can take a few seconds - a full-page
-// reload with no feedback reads as broken.
+// works as a normal POST (see ticket_detail.html). This script's job
+// is to avoid a frozen-looking page while the LLM step (if enabled)
+// is thinking, which can take a few seconds - a full-page reload with
+// no feedback reads as broken - AND to survive failure visibly.
+//
+// Bug fixed here (found via code review, not just assumed): an earlier
+// version replaced the whole #suggestion-container's innerHTML on
+// submit, which DESTROYED the #suggest-form element living inside it
+// (it's a child of that container). The failure path then tried
+// form.submit() on a form no longer attached to the document, which is
+// unreliable across browsers, and there was no visible error state at
+// all - a failed request just left "Thinking..." on screen forever.
+// Fixed by never touching the form itself until we have a final
+// result: only the submit button's state changes while a request is
+// in flight, and failures render a real, specific error message next
+// to the still-intact, still-submittable form instead of guessing at
+// a fallback submit.
 
 document.addEventListener("DOMContentLoaded", function () {
     var form = document.getElementById("suggest-form");
     if (!form) return;
 
+    var button = form.querySelector("button");
     var container = document.getElementById("suggestion-container");
     var ticketId = form.dataset.ticketId;
+    var errorBox = null;
 
     form.addEventListener("submit", handleSubmit);
 
     function handleSubmit(event) {
         event.preventDefault();
-        renderLoading();
+        setLoading(true);
+        clearError();
 
         fetch("/tickets/" + ticketId + "/suggest", { method: "POST" })
             .then(function (res) {
-                if (!res.ok) throw new Error("request failed: " + res.status);
+                if (res.status === 429) throw new HttpError(429, "You're doing that a bit fast — wait a moment and try again.");
+                if (!res.ok) throw new HttpError(res.status, "Something went wrong on the server (status " + res.status + "). Try again.");
                 return res.json();
             })
-            .then(renderSuggestion)
-            .catch(function () {
-                // Something about the AJAX path failed (offline, rate
-                // limited, unexpected error) - fall back to a normal
-                // full-page submit rather than leaving the loading
-                // state stuck forever.
-                form.removeEventListener("submit", handleSubmit);
-                form.submit();
+            .then(function (data) {
+                setLoading(false);
+                renderSuggestion(data);
+            })
+            .catch(function (err) {
+                setLoading(false);
+                var message = err instanceof HttpError
+                    ? err.message
+                    : "Couldn't reach the server — check your connection and try again.";
+                showError(message);
             });
     }
 
-    function renderLoading() {
-        container.innerHTML =
-            '<div class="suggestion-box is-loading">' +
-            '<span class="suggestion-label">Thinking…</span>' +
-            '<p style="margin:0; font-size:13px; color: var(--ink-muted);">Checking the knowledge base…</p>' +
-            "</div>";
+    function HttpError(status, message) {
+        this.status = status;
+        this.message = message;
+    }
+    HttpError.prototype = Object.create(Error.prototype);
+
+    function setLoading(isLoading) {
+        if (!button) return;
+        button.disabled = isLoading;
+        button.textContent = isLoading ? "Thinking…" : "Suggest a category";
+    }
+
+    function showError(message) {
+        clearError();
+        errorBox = document.createElement("p");
+        errorBox.className = "form-error-inline";
+        errorBox.setAttribute("role", "alert");
+        errorBox.textContent = message;
+        form.insertAdjacentElement("afterend", errorBox);
+    }
+
+    function clearError() {
+        if (errorBox && errorBox.parentNode) errorBox.parentNode.removeChild(errorBox);
+        errorBox = null;
     }
 
     function esc(value) {
@@ -49,6 +86,9 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function renderSuggestion(data) {
+        // Only replace the container's content once we have a real,
+        // final result - this is the point where the form is meant to
+        // go away, having done its job.
         if (data.abstained) {
             container.innerHTML =
                 '<div class="suggestion-box is-abstained">' +

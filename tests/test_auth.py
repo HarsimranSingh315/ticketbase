@@ -60,3 +60,40 @@ def test_auth_disabled_by_default(client):
     # relies on.
     resp = client.post("/tickets", json={"description": "no auth needed"})
     assert resp.status_code == 201
+
+
+def test_ui_category_write_rejected_without_api_key(auth_client):
+    """
+    Regression test for a real, confirmed security gap: the JSON API
+    correctly rejected an unauthenticated category write (401), but the
+    browser form route for the exact same action succeeded completely
+    and PERSISTED category_confirmed=True with zero authentication.
+    Reproduced independently before fixing - this locks in the fix.
+    """
+    ticket = auth_client.post(
+        "/tickets", json={"description": "battery issue"}, headers={"X-API-Key": TEST_API_KEY}
+    ).json()
+
+    resp = auth_client.post(f"/ui/tickets/{ticket['id']}/category", data={"category": "hardware"})
+    assert resp.status_code == 401
+
+    # Confirm it genuinely did not persist, not just that the response
+    # code looked right.
+    check = auth_client.get(f"/tickets/{ticket['id']}", headers={"X-API-Key": TEST_API_KEY}).json()
+    assert check["category"] is None
+    assert check["category_confirmed"] is False
+
+
+def test_ui_ticket_creation_rejected_without_api_key(auth_client):
+    resp = auth_client.post("/ui/tickets", data={"description": "should not be created"})
+    assert resp.status_code == 401
+
+
+def test_ui_status_update_rejected_without_api_key(auth_client):
+    ticket = auth_client.post(
+        "/tickets", json={"description": "test"}, headers={"X-API-Key": TEST_API_KEY}
+    ).json()
+    resp = auth_client.post(f"/ui/tickets/{ticket['id']}/status", data={"status": "resolved"})
+    assert resp.status_code == 401
+    check = auth_client.get(f"/tickets/{ticket['id']}", headers={"X-API-Key": TEST_API_KEY}).json()
+    assert check["status"] == "open"

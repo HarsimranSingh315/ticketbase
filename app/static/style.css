@@ -323,6 +323,12 @@ textarea:focus-visible, select:focus-visible {
     font-size: 13px;
 }
 
+.form-error-inline {
+    color: var(--brick);
+    font-size: 13px;
+    margin-top: 8px;
+}
+
 /* ---------- SupportRAG suggestion — the provisional panel ---------- */
 
 .suggestion-box {
