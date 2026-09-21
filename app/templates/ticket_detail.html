@@ -153,6 +153,83 @@
     </div>
 </section>
 
+<section class="panel">
+    <h2>Email to customer</h2>
+    {% for message in messages %}
+        {% set job = message_jobs.get(message.id) %}
+        <div class="message-card">
+            {% if message.status.value == 'draft' %}
+                <span class="tag" style="border-color: var(--ochre); color: var(--ochre);">Draft</span>
+                {% if user.role.value != 'reviewer' %}
+                <form method="post" action="/ui/tickets/{{ ticket.id }}/messages/{{ message.id }}" class="message-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="version" value="{{ message.version }}">
+                    <label>To</label>
+                    <input type="email" name="recipient_email" value="{{ message.recipient_email }}" required>
+                    <label>Subject</label>
+                    <input type="text" name="subject" value="{{ message.subject }}" required>
+                    <label>Body</label>
+                    <textarea name="body" rows="5" required>{{ message.body }}</textarea>
+                    <div class="message-actions">
+                        <button type="submit" class="btn btn-quiet">Save changes</button>
+                    </div>
+                </form>
+                <form method="post" action="/ui/tickets/{{ ticket.id }}/messages/{{ message.id }}/approve" class="message-actions">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="version" value="{{ message.version }}">
+                    <button type="submit" class="btn">Approve &amp; send</button>
+                </form>
+                <p class="hint">Approving locks the exact recipient, subject, and body — editing afterward is not possible; you'd start a new draft instead. This binds an authenticated actor and timestamp to the send, per the audit trail below.</p>
+                {% endif %}
+            {% else %}
+                {% if message.status.value == 'approved' %}
+                    <span class="tag" style="border-color: var(--pine); color: var(--pine);">Approved — queued to send</span>
+                {% elif message.status.value == 'sent' %}
+                    <span class="tag" style="border-color: var(--pine); color: var(--pine);">Sent</span>
+                {% elif message.status.value == 'failed' %}
+                    <span class="tag" style="border-color: var(--brick); color: var(--brick);">Failed</span>
+                {% elif message.status.value == 'bounced' %}
+                    <span class="tag" style="border-color: var(--brick); color: var(--brick);">Bounced</span>
+                {% endif %}
+                <div class="message-readonly">
+                    <p><b>To:</b> {{ message.approved_recipient_email }}</p>
+                    <p><b>Subject:</b> {{ message.approved_subject }}</p>
+                    <pre class="draft-response">{{ message.approved_body }}</pre>
+                </div>
+                <p class="hint">
+                    Approved by {{ audit_actors[message.approved_by_user_id].name if message.approved_by_user_id in audit_actors else 'unknown' }}
+                    on {{ message.approved_at.strftime('%b %-d, %Y at %H:%M') }} UTC.
+                    {% if job %}
+                        {% if job.status.value == 'sent' %}Sent (provider ref: {{ job.provider_message_id }}).
+                        {% elif job.status.value == 'pending' %}Queued for delivery (attempt {{ job.attempts }}/{{ job.max_attempts }}).
+                        {% elif job.status.value == 'claimed' %}Being sent right now by a worker.
+                        {% elif job.status.value == 'failed' %}Delivery failed after {{ job.attempts }} attempt(s){% if job.last_error %}: {{ job.last_error }}{% endif %}.
+                        {% endif %}
+                    {% endif %}
+                </p>
+            {% endif %}
+        </div>
+    {% endfor %}
+
+    {% if user.role.value != 'reviewer' %}
+    <details class="disclosure">
+        <summary>Draft a new message</summary>
+        <form method="post" action="/ui/tickets/{{ ticket.id }}/messages" class="message-form" style="margin-top: 10px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>To</label>
+            <input type="email" name="recipient_email" placeholder="customer@example.com" required>
+            <label>Subject</label>
+            <input type="text" name="subject" placeholder="Re: your support ticket" required>
+            <label>Body</label>
+            <textarea name="body" rows="5" placeholder="Write the message…" required></textarea>
+            <div class="message-actions">
+                <button type="submit" class="btn btn-quiet">Save as draft</button>
+            </div>
+        </form>
+    </details>
+    {% endif %}
+</section>
+
 {% if audit_events %}
 <section class="panel">
     <h2>Activity</h2>

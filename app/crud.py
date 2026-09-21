@@ -464,3 +464,222 @@ def get_valid_invite(db: Session, token: str) -> Optional[Invite]:
 def mark_invite_used(db: Session, invite: Invite) -> None:
     invite.used_at = _utcnow()
     db.commit()
+
+
+# --- Milestone 2: draft/approve/outbox (outbound email) ---
+
+from app.models import OutboundMessage, OutboxJob, MessageStatus, OutboxJobStatus
+
+
+class MessageNotDraft(Exception):
+    """Raised when an edit is attempted on a message that's already
+    been approved (or beyond). Editing content/recipient after approval
+    is exactly the thing this whole workflow exists to prevent."""
+    def __init__(self, message_id: int, status: str):
+        self.message_id = message_id
+        self.status = status
+        super().__init__(f"Message {message_id} is {status}, not a draft - it can no longer be edited.")
+
+
+def create_draft(db: Session, ticket_id: int, recipient_email: str, subject: str, body: str, created_by_user_id: int) -> OutboundMessage:
+    message = OutboundMessage(
+        ticket_id=ticket_id, recipient_email=recipient_email, subject=subject, body=body,
+        created_by_user_id=created_by_user_id, status=MessageStatus.draft,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def get_message(db: Session, message_id: int) -> Optional[OutboundMessage]:
+    return db.query(OutboundMessage).filter(OutboundMessage.id == message_id).first()
+
+
+def list_messages_for_ticket(db: Session, ticket_id: int) -> list[OutboundMessage]:
+    return (
+        db.query(OutboundMessage)
+        .filter(OutboundMessage.ticket_id == ticket_id)
+        .order_by(OutboundMessage.created_at.desc())
+        .all()
+    )
+
+
+def update_draft(db: Session, message_id: int, recipient_email: str, subject: str, body: str, expected_version: int) -> Optional[OutboundMessage]:
+    """Edits a draft's live fields. Raises MessageNotDraft if the
+    message has already been approved - this is the enforcement point
+    for "editing after approval is not allowed" on the write path (the
+    UI also hides the edit form once approved - this is the real
+    guarantee, that isn't)."""
+    message = get_message(db, message_id)
+    if message is None:
+        return None
+    if message.status != MessageStatus.draft:
+        raise MessageNotDraft(message_id, message.status.value)
+    if message.version != expected_version:
+        raise VersionConflict(message_id, expected_version, message.version)
+
+    message.recipient_email = recipient_email
+    message.subject = subject
+    message.body = body
+    message.version += 1
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def approve_message(db: Session, message_id: int, actor_user_id: int, expected_version: int) -> Optional[OutboundMessage]:
+    """
+    THE core transactional-outbox operation. Takes an immutable
+    snapshot of the exact recipient/subject/body being approved, AND
+    creates the OutboxJob that will actually send it - in the SAME
+    db.commit(), so there is no window where a message is approved but
+    never queued (or queued without ever having been approved). The
+    OutboxJob's operation_key is derived deterministically from the
+    message ID, not freshly generated - so even if this function were
+    somehow called twice for the same message (it can't be: the
+    `status != draft` check below and the route's own guard both
+    prevent it, and the column-level UNIQUE constraint on
+    OutboxJob.message_id is a third, structural backstop), only one
+    job could ever exist for it.
+    """
+    message = get_message(db, message_id)
+    if message is None:
+        return None
+    if message.status != MessageStatus.draft:
+        raise MessageNotDraft(message_id, message.status.value)
+    if message.version != expected_version:
+        raise VersionConflict(message_id, expected_version, message.version)
+
+    now = _utcnow()
+    message.status = MessageStatus.approved
+    message.approved_by_user_id = actor_user_id
+    message.approved_at = now
+    message.approved_recipient_email = message.recipient_email
+    message.approved_subject = message.subject
+    message.approved_body = message.body
+    message.version += 1
+
+    job = OutboxJob(
+        operation_key=f"message-{message_id}",
+        message_id=message_id,
+        status=OutboxJobStatus.pending,
+        next_attempt_at=now,
+    )
+    db.add(job)
+
+    _record_audit_event(
+        db, actor_user_id, "message.approved", "outbound_message", message_id,
+        details={"recipient": message.approved_recipient_email},
+    )
+
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def get_outbox_job_for_message(db: Session, message_id: int) -> Optional[OutboxJob]:
+    return db.query(OutboxJob).filter(OutboxJob.message_id == message_id).first()
+
+
+# --- Worker-side outbox operations (see worker.py) ---
+
+def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[OutboxJob]:
+    """
+    Atomically claims one job: either genuinely pending-and-due, or
+    claimed-by-a-worker-whose-lease-expired (crash recovery - a worker
+    that died mid-job leaves it claimed forever otherwise). Uses a
+    compare-and-swap UPDATE ... WHERE status=<the status we just read>
+    pattern rather than SELECT ... FOR UPDATE SKIP LOCKED, specifically
+    so this works unchanged on SQLite (tests, local dev) as well as
+    Postgres - the WHERE-matches-old-status UPDATE is atomic at the
+    single-row level on both, which is all the correctness this needs.
+    Verified directly with two concurrent DB sessions racing for the
+    same job - see tests/test_outbox.py.
+    """
+    from sqlalchemy import or_, and_
+
+    now = _utcnow()
+    lease_until = now + timedelta(seconds=lease_seconds)
+
+    candidate = (
+        db.query(OutboxJob)
+        .filter(
+            or_(
+                and_(OutboxJob.status == OutboxJobStatus.pending, OutboxJob.next_attempt_at <= now),
+                and_(OutboxJob.status == OutboxJobStatus.claimed, OutboxJob.leased_until < now),
+            )
+        )
+        .order_by(OutboxJob.next_attempt_at.asc())
+        .first()
+    )
+    if candidate is None:
+        return None
+
+    previous_status = candidate.status
+    updated_rows = (
+        db.query(OutboxJob)
+        .filter(OutboxJob.id == candidate.id, OutboxJob.status == previous_status)
+        .update(
+            {
+                "status": OutboxJobStatus.claimed,
+                "leased_by": worker_id,
+                "leased_until": lease_until,
+                "attempts": OutboxJob.attempts + 1,
+                "updated_at": now,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    if updated_rows == 0:
+        # Someone else claimed it between our SELECT and our UPDATE -
+        # not an error, just a lost race. The caller should try again
+        # for a different job.
+        return None
+
+    db.refresh(candidate)
+    return candidate
+
+
+def complete_job(db: Session, job_id: int, provider_message_id: Optional[str]) -> None:
+    """Marks a job (and its message) as successfully sent. Called by
+    the worker after a successful adapter.send()."""
+    job = db.query(OutboxJob).filter(OutboxJob.id == job_id).first()
+    if job is None:
+        return
+    job.status = OutboxJobStatus.sent
+    job.provider_message_id = provider_message_id
+    job.updated_at = _utcnow()
+
+    message = get_message(db, job.message_id)
+    if message is not None:
+        message.status = MessageStatus.sent
+
+    db.commit()
+
+
+def fail_job(db: Session, job_id: int, error: str, backoff_seconds: int) -> None:
+    """
+    Records a failed send attempt. If attempts have reached
+    max_attempts, the job becomes terminally `failed` (and the message
+    too) - a bounded retry policy, not infinite retries. Otherwise it's
+    rescheduled with the given backoff and left `pending` for another
+    worker (or the same one, later) to pick up again.
+    """
+    job = db.query(OutboxJob).filter(OutboxJob.id == job_id).first()
+    if job is None:
+        return
+    job.last_error = error[:2000]
+    job.updated_at = _utcnow()
+
+    if job.attempts >= job.max_attempts:
+        job.status = OutboxJobStatus.failed
+        message = get_message(db, job.message_id)
+        if message is not None:
+            message.status = MessageStatus.failed
+    else:
+        job.status = OutboxJobStatus.pending
+        job.next_attempt_at = _utcnow() + timedelta(seconds=backoff_seconds)
+
+    db.commit()

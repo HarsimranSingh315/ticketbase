@@ -476,7 +476,8 @@ def ui_ticket_detail(
 def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, request: Request, settings: Settings, suggestion=None, conflict_error: Optional[str] = None) -> dict:
     """Shared context-building for every route that renders
     ticket_detail.html, so each one doesn't have to remember every
-    field (customer, assignee, agents list, audit trail) individually."""
+    field (customer, assignee, agents list, audit trail, draft
+    messages) individually."""
     customer = crud.get_customer(db, ticket.customer_id) if ticket.customer_id else None
     assignee = crud.get_user(db, ticket.assignee_id) if ticket.assignee_id else None
     agents = crud.list_agents(db)
@@ -487,12 +488,15 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
             actor = crud.get_user(db, event.actor_user_id)
             if actor:
                 audit_actors[actor.id] = actor
+    messages = crud.list_messages_for_ticket(db, ticket.id)
+    message_jobs = {m.id: crud.get_outbox_job_for_message(db, m.id) for m in messages}
     return {
         "ticket": ticket, "related_tickets": related_tickets, "user": user,
         "csrf_token": csrf_token_for_template(request, settings),
         "customer": customer, "assignee": assignee, "agents": agents,
         "audit_events": audit_events, "audit_actors": audit_actors,
         "suggestion": suggestion, "conflict_error": conflict_error,
+        "messages": messages, "message_jobs": message_jobs,
     }
 
 
@@ -603,6 +607,66 @@ def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: R
         conflict_error="This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
     )
     return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=409)
+
+
+# --- Outbound messages (Milestone 2: draft, approve, send) ---
+#
+# Same shape as every other ticket write: admin/agent only, CSRF-
+# protected, version-checked. Approval additionally snapshots the
+# content and enqueues the outbox job - see crud.approve_message.
+
+@app.post("/ui/tickets/{ticket_id}/messages", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_create_draft_message(
+    request: Request, ticket_id: int,
+    recipient_email: str = Form(...), subject: str = Form(...), body: str = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+):
+    if crud.get_ticket(db, ticket_id) is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    crud.create_draft(db, ticket_id, recipient_email.strip(), subject.strip(), body, created_by_user_id=user.id)
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+@app.post("/ui/tickets/{ticket_id}/messages/{message_id}", dependencies=[Depends(require_csrf)])
+def ui_update_draft_message(
+    request: Request, ticket_id: int, message_id: int,
+    recipient_email: str = Form(...), subject: str = Form(...), body: str = Form(...), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    try:
+        message = crud.update_draft(db, message_id, recipient_email.strip(), subject.strip(), body, expected_version=version)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    except crud.MessageNotDraft:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if message is None:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+@app.post("/ui/tickets/{ticket_id}/messages/{message_id}/approve", dependencies=[Depends(require_csrf)])
+def ui_approve_message(
+    request: Request, ticket_id: int, message_id: int, version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    """
+    Approves a message: snapshots its exact content, and atomically
+    queues it for sending (see crud.approve_message). This is the
+    agent-confirmation gate the brief requires per outgoing message -
+    nothing else in the system can queue a send without this exact,
+    authenticated, version-checked call happening first.
+    """
+    try:
+        message = crud.approve_message(db, message_id, actor_user_id=user.id, expected_version=version)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    except crud.MessageNotDraft:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if message is None:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
 # --- Customers (Milestone 1: exact customer history, separate from

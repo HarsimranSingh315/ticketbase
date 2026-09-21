@@ -468,3 +468,162 @@ email drafts: persisted drafts, an explicit approval step, a
 transactional outbox, a durable worker, a local mail sink by default
 and a real provider adapter when configured) is the next substantial
 piece of new product surface, per the brief's own milestone ordering.
+
+---
+
+## Milestone 2: reviewed email drafts, approval, transactional outbox, worker
+
+### What was built
+
+- `OutboundMessage`: a drafted email tied to a ticket. `draft` →
+  `approved` → `sent` (or terminal `failed`/`bounced`). Approval
+  snapshots the exact recipient/subject/body into separate
+  `approved_*` columns - the live fields stay editable only while still
+  a draft; `crud.update_draft` and the approve route both refuse to
+  touch an already-approved message (`crud.MessageNotDraft`).
+- `OutboxJob`: the transactional outbox. `crud.approve_message` creates
+  the message's approval snapshot AND its outbox job in the exact same
+  `db.commit()` - there is no window where a message is approved but
+  never queued, or queued without ever being approved. `operation_key`
+  is derived deterministically from the message ID
+  (`message-{id}`), not a fresh UUID per attempt, and is column-level
+  UNIQUE - structurally impossible for two jobs to exist for one message.
+- `worker.py`: a genuinely separate process (not a background task
+  inside the web app - see its own docstring for why that separation
+  matters). Claims jobs via `crud.claim_next_job`, a compare-and-swap
+  `UPDATE ... WHERE status=<expected>` that's portable across SQLite
+  and Postgres, with lease-based crash recovery (a worker that dies
+  mid-job leaves it claimed until the lease expires, then another
+  worker can pick it up). Bounded retries with exponential backoff;
+  after `max_attempts` a job becomes terminally `failed`, not retried
+  forever.
+- `app/mail.py`: two adapters behind one interface. `LocalSinkAdapter`
+  (default, zero config) durably records "sent" mail to a
+  `local_sink_emails` table instead of any real network call -
+  genuinely idempotent (a second `send()` with the same key is
+  detected and treated as already-done, not duplicated - this is what
+  makes a worker's retry-after-a-maybe-successful-send safe).
+  `ResendAdapter` is a real integration, used only when
+  `RESEND_API_KEY` is set.
+
+### An honest limitation, stated the same way as the LLM integration before it
+
+`ResendAdapter` is written and passes its own unit tests (mocked), but
+**has not been verified against a live Resend account** - there is no
+API key available in this environment. Same situation, same honesty,
+as `app/llm.py`'s Groq integration before a real key existed for it:
+if you configure a real `RESEND_API_KEY`, test it yourself before
+trusting it in anger. Real webhook signature validation for delivery/
+bounce callbacks is similarly not built - the local sink treats "sent"
+as terminal, which is honest for what it actually is (no real delivery
+concept without a real provider), but a live provider's async
+delivered/bounced callbacks are a real gap, not yet closed.
+
+### Two real bugs found via actual testing, fixed before shipping
+
+1. **The migration broke on downgrade-then-upgrade, on Postgres only.**
+   `sa.Enum(...)` creates a separate named Postgres TYPE alongside the
+   table it's used in - `DROP TABLE` does not drop that type. So
+   `alembic downgrade` followed by `alembic upgrade head` again failed
+   with "type already exists" on the `CREATE TYPE` statement. SQLite
+   has no such concept, so this was completely invisible there -
+   exactly the class of bug the whole "test migrations against real
+   Postgres" effort exists to catch, and it did. Fixed by explicitly
+   dropping the enum types in `downgrade()`.
+
+   Caught a second mistake while fixing the first: my initial fix
+   claimed in a comment that running `DROP TYPE` unconditionally was
+   safe because "SQLite silently no-ops it." I tested that claim
+   directly instead of trusting it - `sqlite3.OperationalError: near
+   "TYPE": syntax error`. It does not no-op; it raises. Fixed properly
+   by guarding the statement to run only when `bind.dialect.name ==
+   "postgresql"`.
+
+2. **Test-writing mistakes, same two classes as earlier in this
+   project, caught by actually running the tests rather than assuming
+   they'd pass:** `worker.run_one_cycle()` opens its own `SessionLocal()`
+   internally (correct for a real standalone process, but it means a
+   test calling it directly hits the real dev/prod database unless
+   patched) - fixed with `monkeypatch.setattr(worker_module,
+   "SessionLocal", TestSessionLocal)`. And `TestClient` auto-follows
+   redirects by default, so an assertion expecting `303` silently saw
+   `200` instead until `follow_redirects=False` was added - the same
+   mistake this project's auth tests hit earlier, still worth
+   re-catching each time rather than assumed fixed once.
+
+### Verified concurrency, not just claimed
+
+`crud.claim_next_job`'s own docstring makes a specific claim: two
+workers racing for the same job produce exactly one winner. This was
+verified twice, at two different strengths:
+
+- **In the pytest suite** (`test_concurrent_workers_racing_for_the_same_job_only_one_wins`),
+  using two real, separate DB sessions - but run sequentially
+  (`t1.join()` before `t2.start()`), noted honestly in the test's own
+  comment, because SQLite's `StaticPool` serializes access to its
+  single connection and can't exercise genuine concurrent access.
+- **Separately, by hand, against real Postgres**, using a
+  `threading.Barrier` to force two threads onto two separate
+  Postgres connections at the same instant - actual concurrent access,
+  not sequential-but-same-codepath. Result: exactly one winner, the
+  loser correctly got `None`, and the job's `attempts` counter was `1`,
+  not `2` (proving the loser's attempted UPDATE genuinely matched zero
+  rows rather than double-incrementing). This is the strength of
+  evidence the brief's own acceptance test asks for
+  ("double-clicking send and concurrent workers create one send
+  intent").
+
+### Full manual end-to-end verification
+
+Beyond the automated tests: ran the complete real flow by hand -
+create draft → edit draft (version bumped correctly) → approve
+(content snapshotted, real actor recorded) → attempt to edit the
+now-approved message (correctly rejected, 409, content unchanged) →
+run `worker.py --once` **as a genuine separate subprocess** (not a
+function call inside the test process) → confirmed the message and
+job both flipped to `sent`, and the local sink table captured the
+exact approved recipient/subject/body.
+
+### docker-compose.yml: a real worker service
+
+Added a `worker` service alongside `postgres`/`migrate`/`app`, running
+`python worker.py` continuously, waiting on the same
+migrate-completes-successfully gate as `app`. Same honest limitation
+as the rest of Docker in this project: no daemon in this sandbox to
+actually run `docker compose up` with, so this is verified by
+structure and YAML validity, not a live run.
+
+### Test suite
+
+```
+$ python -m pytest -q
+97 passed, 3 warnings
+```
+
+13 new tests in `tests/test_outbox.py`, plus the full suite re-verified
+against real Postgres (`TEST_DATABASE_URL=postgresql://...`) - all 97
+pass there too.
+
+### Known limitations, stated plainly
+
+- `ResendAdapter` unverified against a live account (see above).
+- No webhook/callback handling for real provider delivery, bounce, or
+  failure events - the local sink's "sent is terminal" model doesn't
+  need this, but a real deployment with Resend configured would need
+  it built before delivery/bounce states mean anything beyond initial
+  send.
+- No UI surface for `bounced` state specifically (the template handles
+  it, but nothing can currently set it without webhook handling).
+- Editing a draft after creating it doesn't re-run SupportRAG or
+  otherwise assist the agent - drafting a reply is entirely manual
+  text entry right now, with no AI assistance in this slice (a
+  reasonable, deliberately separate future enhancement, not attempted
+  here).
+- `docker-compose.yml`'s new `worker` service, like the rest of Docker
+  in this project, is unverified end-to-end (no daemon available).
+
+### Next milestone
+
+Per the brief's ordering: Milestone 3 (a real customer-facing phone
+integration) or closing the Resend/webhook gap named above with a real
+provider account, whichever matters more for the actual next use case.

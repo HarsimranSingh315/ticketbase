@@ -205,6 +205,131 @@ class AuditEvent(Base):
     created_at = Column(DateTime, default=_utcnow)
 
 
+
+class MessageStatus(str, enum.Enum):
+    """
+    draft -> approved -> sent (happy path). failed is terminal after
+    bounded retries exhaust; bounced is terminal on a provider bounce
+    callback (Milestone 2 next-step - webhook handling isn't built
+    yet, see README). abstained/rejected states don't exist here on
+    purpose - a draft an agent doesn't like is just edited or deleted,
+    not "rejected" as a workflow state.
+    """
+    draft = "draft"
+    approved = "approved"
+    sent = "sent"
+    failed = "failed"
+    bounced = "bounced"
+
+
+class OutboundMessage(Base):
+    """
+    A drafted (and, once approved, immutably snapshotted) outbound
+    email tied to a ticket. The core rule this table enforces: editing
+    content or recipient after approval is not allowed - approval binds
+    the EXACT recipient/subject/body, timestamp, and approver. If an
+    agent wants to change something after approving, that's a NEW
+    draft, not an edit to the approved one. `approved_*` columns are a
+    snapshot taken at approval time, kept separate from the live
+    editable fields, so there's no ambiguity about what was approved
+    even if a future code path somehow touched the live fields (defense
+    in depth - the routes in main.py already block editing an approved
+    message, this is the data-layer backstop for that rule).
+    """
+    __tablename__ = "outbound_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+
+    recipient_email = Column(String, nullable=False)
+    subject = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+
+    status = Column(SAEnum(MessageStatus), nullable=False, default=MessageStatus.draft)
+
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+
+    approved_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    approved_recipient_email = Column(String, nullable=True)
+    approved_subject = Column(String, nullable=True)
+    approved_body = Column(Text, nullable=True)
+
+    # Optimistic concurrency, same pattern as Ticket.version.
+    version = Column(Integer, nullable=False, default=1)
+
+
+class OutboxJobStatus(str, enum.Enum):
+    pending = "pending"
+    claimed = "claimed"
+    sent = "sent"
+    failed = "failed"       # terminal - bounded retries exhausted
+    ambiguous = "ambiguous"  # terminal-ish - needs human reconciliation (see worker.py)
+
+
+class OutboxJob(Base):
+    """
+    The transactional outbox: approving a message and creating its
+    OutboxJob happen in the SAME db.commit() (see crud.approve_message),
+    so there's no window where a message is "approved" but never
+    queued, or queued twice. `operation_key` is a stable idempotency
+    key derived from the message ID (not a fresh UUID per attempt) -
+    re-approving (blocked by the API anyway) or a worker retry can
+    never produce two jobs for the same message, enforced by the
+    column's own uniqueness, not just application logic remembering to
+    check.
+
+    Claiming (`leased_by`/`leased_until`) uses a compare-and-swap
+    UPDATE ... WHERE status=<expected> pattern (see
+    crud.claim_next_job) rather than SELECT ... FOR UPDATE SKIP LOCKED,
+    specifically so the exact same code works on both SQLite (tests,
+    local dev) and Postgres (production) - verified with a real
+    concurrent-claim test using two separate DB sessions.
+    """
+    __tablename__ = "outbox_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    operation_key = Column(String, unique=True, nullable=False, index=True)
+    message_id = Column(Integer, ForeignKey("outbound_messages.id"), nullable=False, unique=True)
+
+    status = Column(SAEnum(OutboxJobStatus), nullable=False, default=OutboxJobStatus.pending)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+
+    leased_by = Column(String, nullable=True)
+    leased_until = Column(DateTime, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=False, default=_utcnow)
+
+    provider_message_id = Column(String, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow)
+
+
+class LocalSinkEmail(Base):
+    """
+    Where "sent" mail actually lands when no real provider is
+    configured (the default - see Settings.resend_api_key). This is
+    what makes the local sink genuinely useful for review/demo rather
+    than a no-op: every email the app would have sent is here,
+    inspectable, with the exact idempotency key that was used to send
+    it. `idempotency_key` is UNIQUE - this is what makes the local sink
+    adapter itself idempotent (see app/mail.py): a second send attempt
+    with the same key is detected and treated as already-sent rather
+    than creating a duplicate row.
+    """
+    __tablename__ = "local_sink_emails"
+
+    id = Column(Integer, primary_key=True, index=True)
+    idempotency_key = Column(String, unique=True, nullable=False, index=True)
+    recipient_email = Column(String, nullable=False)
+    subject = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    sent_at = Column(DateTime, default=_utcnow)
+
+
 class KnowledgeArticle(Base):
     """
     A knowledge-base entry used by SupportRAG (Project 2) to suggest a

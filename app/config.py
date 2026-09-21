@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = ""
     bootstrap_admin_name: str = "Admin"
 
+    # Milestone 2: outbound email. Empty resend_api_key (the default)
+    # means the LocalSinkAdapter is used - nothing ever leaves the
+    # machine, "sent" mail lands in the local_sink_emails table where
+    # it can be inspected. Set RESEND_API_KEY to switch to the real
+    # Resend adapter (app/mail.py) - written and unit-tested with
+    # mocks, but not verified against a live account in this project
+    # (no key available), same honesty as the Groq LLM integration
+    # before its key existed.
+    resend_api_key: str = ""
+    mail_from_address: str = "support@ticketbase.local"
+    mail_from_name: str = "TicketBase Support"
+
+    # Outbox worker tuning (see worker.py).
+    outbox_lease_seconds: int = 60
+    outbox_max_attempts: int = 5
+    outbox_poll_interval_seconds: float = 2.0
+
 
 @lru_cache
 def get_settings() -> Settings:

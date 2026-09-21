@@ -364,6 +364,39 @@ textarea:focus-visible, select:focus-visible {
 .audit-action { color: var(--ink-muted); }
 .audit-time { color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; margin-left: auto; white-space: nowrap; }
 
+.message-card {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--rule);
+}
+.message-card:last-of-type { border-bottom: none; }
+.message-form {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.message-form label {
+    font-size: 12px;
+    color: var(--ink-muted);
+    margin-top: 6px;
+}
+.message-form input, .message-form textarea {
+    padding: 7px 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius);
+    background: var(--paper-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    resize: vertical;
+}
+.message-actions { margin-top: 8px; }
+.message-readonly {
+    margin-top: 10px;
+    font-size: 13px;
+}
+.message-readonly p { margin: 4px 0; }
+
 /* ---------- Status / category forms ---------- */
 
 .stack-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

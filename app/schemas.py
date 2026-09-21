@@ -109,3 +109,16 @@ class AuditEventOut(BaseModel):
     action: str
     details: Optional[str] = None
     created_at: datetime
+
+
+class OutboundMessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    ticket_id: int
+    recipient_email: str
+    subject: str
+    body: str
+    status: str
+    version: int
+    approved_at: Optional[datetime] = None
+    created_at: datetime

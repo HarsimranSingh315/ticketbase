@@ -50,5 +50,24 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # The outbox worker (worker.py) - a genuinely separate process from
+  # the web app, per the brief's architecture guidance. A stuck mail
+  # provider can never block or slow down request handling in `app`,
+  # since the two are only connected through the outbox_jobs table,
+  # not any shared in-process state. Runs continuously, polling for
+  # approved messages to send.
+  worker:
+    build: .
+    command: ["python", "worker.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://ticketbase:ticketbase@postgres:5432/ticketbase
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   ticketbase_pgdata:
