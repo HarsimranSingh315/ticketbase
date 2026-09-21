@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Knowledge base — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/" class="back-link">← All tickets</a>
+
+<section class="panel">
+    <div class="list-controls">
+        <h2 style="margin:0;">Knowledge base <span class="kb-count">{{ total_count }}</span></h2>
+        <form method="get" action="/kb" class="search-form">
+            <input type="search" name="q" value="{{ current_q or '' }}" placeholder="Search articles…">
+        </form>
+    </div>
+    <p class="hint" style="margin-top: 10px;">
+        SupportRAG suggests ticket categories and drafts responses by retrieving the
+        most similar article here. Adding, editing, or removing an article takes
+        effect immediately — the next suggestion made anywhere in the app uses it.
+    </p>
+    {% if user.role.value != 'reviewer' %}
+    <a href="/kb/new" class="btn" style="margin-top: 12px; display: inline-block; text-decoration: none;">New article</a>
+    {% endif %}
+</section>
+
+{% if grouped_articles %}
+    {% for category, articles in grouped_articles.items() %}
+    <section class="panel">
+        <h2 class="kb-category-header">{{ category }}<span class="kb-category-count">{{ articles|length }}</span></h2>
+        <ul class="kb-article-list">
+            {% for article in articles %}
+            <li>
+                <a href="/kb/{{ article.id }}" class="kb-article-title">{{ article.title }}</a>
+                <p class="kb-article-preview">{{ article.content[:140] }}{% if article.content|length > 140 %}…{% endif %}</p>
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endfor %}
+{% else %}
+<section class="panel">
+    <p class="empty-state">
+        {% if current_q %}No articles match "{{ current_q }}".{% else %}No knowledge base articles yet.{% endif %}
+    </p>
+</section>
+{% endif %}
+
+{% endblock %}

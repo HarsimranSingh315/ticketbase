@@ -86,74 +86,75 @@ class RAGIndex:
         self.articles = articles
 
 
-def seed_knowledge_base(db: Session, embedder: Embedder) -> bool:
+def seed_knowledge_base(db: Session) -> None:
     """
-    Keeps knowledge_articles in sync with KB_ARTICLES. Idempotent - safe
-    to call on every app startup. Returns True if it reseeded (and thus
-    left `embedder` fitted on the full current corpus), False if the DB
-    was already in sync (and `embedder` was left untouched).
-
-    Detects drift (the KB_ARTICLES list changed since this DB was last
-    seeded - e.g. an article was added) by comparing the set of titles,
-    and does a full delete + reseed when it differs, rather than only
-    seeding an empty table. Without this, adding a new KB article would
-    silently do nothing for anyone with an existing ticketbase.db - the
-    exact confusion that prompted this fix: a new battery-related
-    article was added to KB_ARTICLES, and a database seeded before that
-    change had no way to pick it up without a manual delete.
-
-    A full reseed (not an incremental upsert) is deliberate: each
-    article's stored embedding must come from an embedder fit on the
-    CURRENT full corpus, or old and new articles end up in different,
-    incomparable vector spaces. Refitting once across the whole set and
-    rewriting every row keeps that invariant simple and always true,
-    at the cost of KB_ARTICLES being the sole source of truth for this
-    table (nothing else writes to it, so nothing is lost).
+    Inserts the initial KB_ARTICLES content, but ONLY when the table is
+    completely empty. This is deliberately simpler than an earlier
+    version of this function, which detected "drift" against
+    KB_ARTICLES (by comparing title sets) and actively reseeded the
+    table to match - reasonable when KB_ARTICLES was the only way to
+    add an article, but WRONG now that admins can create/edit/delete
+    real articles through the UI (see main.py's /kb routes): that old
+    logic would have silently deleted an admin's real work the next
+    time the app started, the moment the DB's title set no longer
+    matched the hardcoded Python list. KB_ARTICLES is now "initial demo
+    content for a fresh database" only, not an ongoing source of truth.
+    Embeddings aren't computed here - build_rag_index (below) always
+    recomputes every article's embedding fresh, so a placeholder here
+    is fine.
     """
-    existing_titles = {row.title for row in db.query(KnowledgeArticle.title).all()}
-    desired_titles = {a["title"] for a in KB_ARTICLES}
-
-    if existing_titles == desired_titles:
-        return False
-
-    logger.info(
-        "Knowledge base drift detected (have %d articles, want %d) - reseeding",
-        len(existing_titles), len(desired_titles),
-    )
-    db.query(KnowledgeArticle).delete()
-
-    embedder.fit([a["content"] for a in KB_ARTICLES])
+    if db.query(KnowledgeArticle).first() is not None:
+        return
+    logger.info("Empty knowledge base - seeding %d initial articles", len(KB_ARTICLES))
     for article in KB_ARTICLES:
-        row = KnowledgeArticle(
-            title=article["title"],
-            category=article["category"],
-            content=article["content"],
-        )
-        row.set_embedding(embedder.embed(article["content"]))
+        row = KnowledgeArticle(title=article["title"], category=article["category"], content=article["content"])
+        row.embedding = "[]"  # placeholder - build_rag_index recomputes this immediately after
         db.add(row)
     db.commit()
-    return True
 
 
 def build_rag_index(db: Session) -> RAGIndex:
     """
-    Fits the embedder on the current KB and snapshots every article's
-    embedding into memory. Call this once at startup (or whenever the KB
-    changes) - not per request.
-    """
-    embedder = Embedder()
-    reseeded = seed_knowledge_base(db, embedder)
-    articles = db.query(KnowledgeArticle).all()
-    if not reseeded:
-        # DB was already in sync with KB_ARTICLES, so seed_knowledge_base
-        # left `embedder` unfitted - fit it now on the existing content.
-        embedder.fit([a.content for a in articles])
+    Fits a fresh embedder on EVERY current article's content, and
+    writes each article's recomputed embedding back to its row, every
+    time this is called - not just at startup. Call it once at startup
+    (see main.py's lifespan handler) AND after any knowledge-base write
+    (create/update/delete - see main.py's /kb routes), so the live
+    RAGIndex cached on app.state never drifts from what an admin
+    actually saved.
 
-    indexed = [
-        _IndexedArticle(id=a.id, title=a.title, category=a.category,
-                         content=a.content, embedding=a.get_embedding())
-        for a in articles
-    ]
+    Always recomputing every embedding (not just new/changed rows) is
+    deliberate, not wasteful for this KB's size (tens of articles,
+    milliseconds to refit - already measured): the TF-IDF/SVD embedder
+    must be fit on the WHOLE corpus at once, so an incrementally-added
+    embedding would live in a different, incomparable vector space from
+    the rest. This also fixes a real, previously-documented gap: the
+    old title-based drift detection could miss a content-only edit
+    (same title, changed body) - recomputing from current DB content
+    every time makes that class of staleness structurally impossible,
+    not just less likely.
+    """
+    seed_knowledge_base(db)
+    articles = db.query(KnowledgeArticle).all()
+
+    embedder = Embedder()
+    indexed: list[_IndexedArticle] = []
+    if len(articles) >= 2:
+        # TruncatedSVD needs at least 2 documents to fit a meaningful
+        # space - see Embedder.fit's own guard. Fewer than that (an
+        # admin deleted down to 0 or 1 articles) means suggestions
+        # simply can't run yet; main.py's /kb delete route blocks
+        # deleting below 2 articles for exactly this reason, but this
+        # check stays here too as a real backstop, not just a UI nicety.
+        embedder.fit([a.content for a in articles])
+        for a in articles:
+            vector = embedder.embed(a.content)
+            a.set_embedding(vector)
+            indexed.append(_IndexedArticle(id=a.id, title=a.title, category=a.category, content=a.content, embedding=vector))
+        db.commit()
+    else:
+        logger.warning("Knowledge base has fewer than 2 articles (%d) - SupportRAG will abstain on everything until more are added", len(articles))
+
     logger.info("RAGIndex built: %d articles indexed", len(indexed))
     return RAGIndex(embedder=embedder, articles=indexed)
 

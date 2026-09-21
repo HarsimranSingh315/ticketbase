@@ -803,3 +803,101 @@ for Twilio's servers to reach, which is a materially bigger step than
 adding a key. Reasonable next steps from here: pursue that public
 deployment to close the phone gap too, or move to a different part of
 the brief (Milestone 4+, or hardening/polish on what's already built).
+
+---
+
+## Knowledge base management (agent-facing CRUD + live-updating RAGIndex)
+
+### What was built
+
+- Full CRUD for knowledge base articles (`/kb`, `/kb/new`, `/kb/{id}`,
+  `/kb/{id}/delete`) - admin/agent only for writes, reviewers get
+  read-only access, matching the role pattern already established
+  everywhere else in this project.
+- List page groups articles by category (not a flat list), with
+  search across title and content.
+- **The core claim: a create/edit/delete takes effect immediately, on
+  the same running app, with no restart** - each write route rebuilds
+  the cached `RAGIndex` on `app.state` right after the write, the same
+  cache object `/suggest` already reads from. Verified for real, not
+  assumed: created a brand-new article covering a topic nothing else in
+  the KB covered, and confirmed a ticket about that exact topic
+  immediately matched it (99.2% confidence) with zero server restart in
+  between. Then edited that same article's content to something
+  unrelated and confirmed the same ticket's suggestion confidence
+  dropped and the drafted response text changed to match the new
+  content - live, not cached-stale.
+
+### A real architectural conflict, found and fixed before it could ship
+
+The OLD `seed_knowledge_base` (from the "self-healing KB" work several
+sessions ago) actively reseeded the table whenever its content didn't
+match the hardcoded `KB_ARTICLES` Python list - reasonable back when
+editing that list was the only way to change the KB, but WRONG the
+moment admins can add real articles through this UI: the next app
+restart would have silently deleted their work, since the DB's content
+would no longer match `KB_ARTICLES` by definition. Fixed by simplifying
+`seed_knowledge_base` to only ever act on a completely empty table -
+`KB_ARTICLES` is now "initial demo content for a fresh database" only,
+never an ongoing sync target. Caught and fixed a related, more subtle
+version of the same class of bug while writing tests: the new `/kb`
+create route calling `build_rag_index` directly (to refresh the live
+index) meant that on a genuinely empty database, an admin's very first
+KB write would insert their row BEFORE the empty-table seed check ran -
+making the table look "already non-empty" and silently skipping the 17
+default articles. Fixed by seeding explicitly before the write, not
+after.
+
+### A real side benefit: the "content-edit-without-title-change" gap is now closed
+
+`docs/current-state.md`'s own Milestone 0 section flagged this as a
+known limitation of the old drift detection: it compared title SETS
+only, so editing an existing article's content without renaming it
+would never trigger a re-embed. The new `build_rag_index` always
+recomputes every article's embedding from current DB content, on every
+call (at startup and after every KB write) - that staleness is now
+structurally impossible, not just less likely. Verified directly: fit
+an index, edited an article's content in place, rebuilt the index, and
+confirmed the resulting embedding vector actually changed to reflect
+the new content (not the stale pre-edit one).
+
+### Test suite
+
+```
+$ python -m pytest -q
+123 passed, 2 warnings
+```
+
+11 new tests in `tests/test_kb_management.py`, plus 2 rewritten tests
+in `tests/test_supportrag.py` (the old drift-detection test no longer
+applied to the new architecture - replaced with tests for the new
+"never overwrites admin content" and "content edits are picked up"
+behaviors). Full suite re-verified against real Postgres - all 123 pass
+there too.
+
+### A note on "best UI," since that was explicitly asked for
+
+Grouped-by-category list (not a flat table) because that's how real
+support knowledge bases are actually organized and scanned. Reused the
+established design language throughout (Fraunces for section headers,
+the same ledger/panel/form patterns as tickets and customers) rather
+than inventing a new visual style for this one feature - consistency
+across the app was judged more valuable here than novelty for its own
+sake.
+
+### Known limitations, stated plainly
+
+- No version history on article edits - an edit simply overwrites the
+  previous content, with no undo.
+- No "which tickets used this article" tracking - an admin can't see
+  an article's actual usage/impact from the KB page itself.
+- The minimum-2-articles delete guard is a real technical constraint
+  (TF-IDF/SVD needs at least 2 documents), not a product choice - worth
+  knowing if that ever feels arbitrary from the UI alone.
+
+### Next milestone
+
+Per the ongoing local-build focus: reporting/analytics, SLA/escalation
+timers, or outbound calling (Twilio's REST API to place a call, distinct
+from the webhook-receiving side already built) - all real, all
+buildable and testable without needing a public deployment.

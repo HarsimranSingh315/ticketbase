@@ -787,3 +787,71 @@ def link_call_to_ticket(db: Session, call_id: int, ticket_id: int) -> Optional[C
     db.commit()
     db.refresh(call)
     return call
+
+
+# --- Knowledge base management ---
+
+from app.models import KnowledgeArticle
+
+
+def list_kb_articles(db: Session, q: Optional[str] = None) -> list[KnowledgeArticle]:
+    query = db.query(KnowledgeArticle)
+    if q:
+        query = query.filter(
+            (KnowledgeArticle.title.ilike(f"%{q}%")) | (KnowledgeArticle.content.ilike(f"%{q}%"))
+        )
+    return query.order_by(KnowledgeArticle.category.asc(), KnowledgeArticle.title.asc()).all()
+
+
+def get_kb_article(db: Session, article_id: int) -> Optional[KnowledgeArticle]:
+    return db.query(KnowledgeArticle).filter(KnowledgeArticle.id == article_id).first()
+
+
+def count_kb_articles(db: Session) -> int:
+    return db.query(KnowledgeArticle).count()
+
+
+def create_kb_article(db: Session, title: str, category: str, content: str) -> KnowledgeArticle:
+    """
+    Inserts the row with a placeholder embedding - the caller (see
+    main.py's /kb routes) is responsible for calling
+    supportrag.build_rag_index(db) immediately after, which recomputes
+    embeddings for the WHOLE corpus (including this new row) and writes
+    the real one back. A single new article can't be embedded in
+    isolation - the TF-IDF/SVD space is fit across all articles at
+    once, so a standalone embedding here would live in the wrong space.
+    """
+    article = KnowledgeArticle(title=title, category=category, content=content)
+    article.embedding = "[]"
+    db.add(article)
+    db.commit()
+    db.refresh(article)
+    return article
+
+
+def update_kb_article(db: Session, article_id: int, title: str, category: str, content: str) -> Optional[KnowledgeArticle]:
+    """Same embedding-recompute caveat as create_kb_article - the
+    caller must rebuild the RAGIndex after this returns."""
+    article = get_kb_article(db, article_id)
+    if article is None:
+        return None
+    article.title = title
+    article.category = category
+    article.content = content
+    db.commit()
+    db.refresh(article)
+    return article
+
+
+def delete_kb_article(db: Session, article_id: int) -> bool:
+    """Returns False if the article didn't exist. Callers (see
+    main.py) are responsible for enforcing the "at least 2 articles
+    must remain" rule BEFORE calling this - see
+    supportrag.build_rag_index's own guard for why fewer than 2 breaks
+    the embedding space entirely, not just degrades it."""
+    article = get_kb_article(db, article_id)
+    if article is None:
+        return False
+    db.delete(article)
+    db.commit()
+    return True

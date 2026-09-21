@@ -58,39 +58,93 @@ def test_suggest_abstains_on_unrelated_gibberish(client):
     assert data["category"] is None
 
 
-def test_kb_drift_triggers_automatic_reseed(client, db_session):
+def test_seed_only_runs_on_an_empty_table_never_overwrites_admin_content(client, db_session):
     """
-    Regression test for a real issue: adding a new article to
-    KB_ARTICLES used to silently do nothing for anyone with an existing
-    database, since the old seed logic only ran on an EMPTY table. This
-    simulates that exact scenario - a DB seeded with an older, smaller
-    KB_ARTICLES set - and confirms build_rag_index (called at app
-    startup) detects the drift and reseeds automatically.
+    Regression test for a real architectural conflict, found and fixed
+    while building KB management UI: an earlier version of
+    seed_knowledge_base actively reseeded the table whenever its
+    content didn't match KB_ARTICLES - reasonable when KB_ARTICLES was
+    the only way to add an article, but WRONG once admins can add real
+    articles through the UI, since the next app startup would have
+    silently deleted their work. This confirms the fix: a table that
+    already has ANY content (even content that doesn't match
+    KB_ARTICLES at all) is left completely alone.
     """
-    from app.embeddings import Embedder
-    from app.kb_articles import KB_ARTICLES
+    from app.models import KnowledgeArticle
+    from app.supportrag import seed_knowledge_base
+
+    db = db_session
+    db.query(KnowledgeArticle).delete()
+    db.commit()
+
+    admin_article = KnowledgeArticle(
+        title="A totally custom admin-added article",
+        category="custom",
+        content="Content an admin wrote themselves, matching nothing in KB_ARTICLES.",
+    )
+    admin_article.embedding = "[]"
+    db.add(admin_article)
+    db.commit()
+
+    seed_knowledge_base(db)
+
+    remaining = db.query(KnowledgeArticle).all()
+    assert len(remaining) == 1
+    assert remaining[0].title == "A totally custom admin-added article"
+
+
+def test_build_rag_index_picks_up_content_only_edits(client, db_session):
+    """
+    A real, previously-documented gap this refactor fixes as a side
+    effect: the old title-based drift detection could miss a
+    content-only edit (same title, changed body), since it only
+    compared title SETS. build_rag_index now recomputes every
+    embedding from current DB content on every call, making that class
+    of staleness structurally impossible rather than just less likely.
+
+    Uses 5 articles, not 2 - with too few documents, TruncatedSVD's
+    component count degenerates to just 1 dimension (min(N_COMPONENTS,
+    docs-1) - found by actually running this test with 2 articles
+    first: it failed, because a single-dimension embedding is too
+    lossy to reliably distinguish even very different content. That's
+    a real, if narrow, property of a tiny corpus - not a bug in this
+    feature - and the fix here is a more realistic test corpus, not a
+    weaker assertion.
+    """
+    from app.embeddings import cosine_similarity
     from app.models import KnowledgeArticle
     from app.supportrag import build_rag_index
 
     db = db_session
-    # Wipe whatever the shared fixture already seeded, and reseed with
-    # an artificially OLDER, smaller KB (one article missing).
     db.query(KnowledgeArticle).delete()
     db.commit()
-    older_articles = KB_ARTICLES[:-1]
-    e = Embedder()
-    e.fit([a["content"] for a in older_articles])
-    for a in older_articles:
-        row = KnowledgeArticle(title=a["title"], category=a["category"], content=a["content"])
-        row.set_embedding(e.embed(a["content"]))
+
+    filler_topics = [
+        ("Printer issue", "Printers jamming and running low on toner."),
+        ("Wifi issue", "Wifi dropping out intermittently on laptops."),
+        ("Login issue", "Users locked out after too many failed password attempts."),
+        ("Billing issue", "Customers charged twice for the same monthly invoice."),
+    ]
+    target = KnowledgeArticle(title="Target article", category="hardware", content="Original content about batteries draining fast on a laptop.")
+    target.embedding = "[]"
+    db.add(target)
+    for title, content in filler_topics:
+        row = KnowledgeArticle(title=title, category="misc", content=content)
+        row.embedding = "[]"
         db.add(row)
     db.commit()
-    assert db.query(KnowledgeArticle).count() == len(older_articles)
 
-    # This is what app startup does - it should detect the drift and
-    # bring the DB back in sync with the full KB_ARTICLES list.
-    build_rag_index(db)
+    index_before = build_rag_index(db)
+    before_vec = next(a.embedding for a in index_before.articles if a.id == target.id)
 
-    assert db.query(KnowledgeArticle).count() == len(KB_ARTICLES)
-    titles = {row.title for row in db.query(KnowledgeArticle.title).all()}
-    assert titles == {a["title"] for a in KB_ARTICLES}
+    # Edit the content directly (same title, same row) - simulates
+    # what the /kb edit route does before calling build_rag_index again.
+    target.content = "Completely different topic now: step-by-step VPN connectivity troubleshooting instructions for remote workers."
+    db.commit()
+
+    index_after = build_rag_index(db)
+    after_vec = next(a.embedding for a in index_after.articles if a.id == target.id)
+
+    # The embedding must have actually changed to reflect the new
+    # content - not stayed stale from the pre-edit fit.
+    assert cosine_similarity(before_vec, after_vec) < 0.99

@@ -40,7 +40,7 @@ from app.auth import (
 )
 from app.models import User, UserRole
 from app.related_tickets import find_related_tickets
-from app.supportrag import SupportRAGService, RAGIndex, build_rag_index
+from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base
 from app.telephony import validate_twilio_signature
 
 settings = get_settings()
@@ -768,6 +768,102 @@ def ui_calls_list(request: Request, db: Session = Depends(get_db), user: User = 
     return templates.TemplateResponse(
         request, "calls.html", {"calls": calls, "contacts_by_id": contacts_by_id, "user": user},
     )
+
+
+@app.get("/kb")
+def ui_kb_list(request: Request, q: Optional[str] = None, db: Session = Depends(get_db), user: User = Depends(require_agent)):
+    articles = crud.list_kb_articles(db, q=q)
+    grouped: dict[str, list] = {}
+    for article in articles:
+        grouped.setdefault(article.category, []).append(article)
+    return templates.TemplateResponse(
+        request, "kb_list.html", {"grouped_articles": grouped, "total_count": len(articles), "current_q": q, "user": user},
+    )
+
+
+@app.get("/kb/new")
+def ui_kb_new_form(request: Request, user: User = Depends(require_role(UserRole.admin, UserRole.agent)), settings: Settings = Depends(get_settings)):
+    return templates.TemplateResponse(
+        request, "kb_edit.html",
+        {"article": None, "user": user, "csrf_token": csrf_token_for_template(request, settings), "error": None},
+    )
+
+
+@app.post("/kb", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_kb_create(
+    request: Request, title: str = Form(...), category: str = Form(...), content: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Creates the article, then IMMEDIATELY rebuilds the cached RAGIndex
+    on app.state so the very next /suggest request sees it - the same
+    cache that's normally only built once at startup (for performance -
+    see supportrag.py) now also gets rebuilt on this deliberately rare,
+    admin-only write path, which doesn't reintroduce the per-request
+    refit cost this project already fixed once.
+
+    Calls seed_knowledge_base FIRST, before the new row is inserted -
+    found via testing, not assumed: build_rag_index's own seeding-if-
+    empty check would otherwise see this new row and conclude the
+    table "isn't empty", silently skipping the initial 17-article seed
+    on a database where this happened to be the very first write. A
+    real (if narrow) production edge case - an admin's first action
+    being a KB article before any ticket ever ran /suggest - not just a
+    test artifact.
+    """
+    seed_knowledge_base(db)
+    article = crud.create_kb_article(db, title.strip(), category.strip(), content)
+    request.app.state.rag_index = build_rag_index(db)
+    return RedirectResponse(url=f"/kb/{article.id}", status_code=303)
+
+
+@app.get("/kb/{article_id}")
+def ui_kb_detail(request: Request, article_id: int, db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+    article = crud.get_kb_article(db, article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
+    return templates.TemplateResponse(
+        request, "kb_edit.html",
+        {"article": article, "user": user, "csrf_token": csrf_token_for_template(request, settings), "error": None},
+    )
+
+
+@app.post("/kb/{article_id}", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_kb_update(
+    request: Request, article_id: int, title: str = Form(...), category: str = Form(...), content: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    article = crud.update_kb_article(db, article_id, title.strip(), category.strip(), content)
+    if article is None:
+        raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
+    request.app.state.rag_index = build_rag_index(db)
+    return RedirectResponse(url=f"/kb/{article_id}", status_code=303)
+
+
+@app.post("/kb/{article_id}/delete", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_kb_delete(request: Request, article_id: int, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)), settings: Settings = Depends(get_settings)):
+    """
+    Blocks deleting below 2 remaining articles - not an arbitrary
+    limit, a real technical one: the TF-IDF/SVD embedder needs at
+    least 2 documents to fit any meaningful space at all (see
+    supportrag.build_rag_index's own guard). Below that, SupportRAG
+    would silently abstain on everything rather than erroring, which
+    is a worse failure mode than just refusing the delete with a clear
+    reason.
+    """
+    if crud.count_kb_articles(db) <= 2:
+        article = crud.get_kb_article(db, article_id)
+        return templates.TemplateResponse(
+            request, "kb_edit.html",
+            {
+                "article": article, "user": user, "csrf_token": csrf_token_for_template(request, settings),
+                "error": "Can't delete this - at least 2 knowledge base articles must remain for SupportRAG to work at all.",
+            },
+            status_code=409,
+        )
+    crud.delete_kb_article(db, article_id)
+    request.app.state.rag_index = build_rag_index(db)
+    return RedirectResponse(url="/kb", status_code=303)
 
 
 # --- Customers (Milestone 1: exact customer history, separate from

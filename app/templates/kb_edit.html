@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{% if article %}{{ article.title }}{% else %}New article{% endif %} — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/kb" class="back-link">← Knowledge base</a>
+
+{% if error %}
+<div class="error-banner">{{ error }}</div>
+{% endif %}
+
+<section class="panel">
+    {% if article %}
+        <span class="case-id">Article #{{ article.id }}</span>
+        <h1 class="case-headline">{{ article.title }}</h1>
+    {% else %}
+        <h1 class="case-headline">New knowledge base article</h1>
+    {% endif %}
+
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="{{ '/kb/' + article.id|string if article else '/kb' }}" class="message-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Title</label>
+        <input type="text" name="title" value="{{ article.title if article else '' }}" placeholder="e.g. VPN will not connect" required>
+        <label>Category</label>
+        <input type="text" name="category" value="{{ article.category if article else '' }}" placeholder="e.g. connectivity, billing, hardware" required>
+        <label>Content</label>
+        <textarea name="content" rows="10" placeholder="What an agent should know, and what SupportRAG will cite and draft from…" required>{{ article.content if article else '' }}</textarea>
+        <div class="message-actions">
+            <button type="submit" class="btn">{% if article %}Save changes{% else %}Create article{% endif %}</button>
+        </div>
+    </form>
+    {% else %}
+    <div class="message-readonly">
+        <p><b>Category:</b> {{ article.category }}</p>
+        <pre class="draft-response">{{ article.content }}</pre>
+    </div>
+    {% endif %}
+</section>
+
+{% if article and user.role.value != 'reviewer' %}
+<section class="panel">
+    <h2>Delete this article</h2>
+    <p class="hint" style="margin-top: 0;">This removes it from SupportRAG's knowledge base immediately. At least 2 articles must always remain.</p>
+    <form method="post" action="/kb/{{ article.id }}/delete" onsubmit="return confirm('Delete this article? This cannot be undone.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-quiet" style="border-color: var(--brick); color: var(--brick);">Delete article</button>
+    </form>
+</section>
+{% endif %}
+
+{% endblock %}
