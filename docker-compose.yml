@@ -15,19 +15,40 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot: applies migrations, then exits. `app` below waits for
+  # this to finish successfully before starting - migrations run once
+  # per release, not on every container start (see Dockerfile). Copy
+  # .env.example to .env before running `docker compose up` - env_file
+  # reads real values (SECRET_KEY, LLM_API_KEY, BOOTSTRAP_ADMIN_*, etc.)
+  # from that file at container-start time; it is NOT baked into the
+  # image (see .dockerignore, which explicitly excludes .env).
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DATABASE_URL is in .env - inside the compose
+      # network, Postgres is reachable at the service name "postgres",
+      # not "localhost".
+      DATABASE_URL: postgresql://ticketbase:ticketbase@postgres:5432/ticketbase
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   app:
     build: .
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql://ticketbase:ticketbase@postgres:5432/ticketbase
-      # Override these at deploy time (e.g. `docker compose run -e API_KEY=...`)
-      # rather than baking secrets into this file.
-      API_KEY: ${API_KEY:-}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   ticketbase_pgdata:

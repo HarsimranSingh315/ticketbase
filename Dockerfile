@@ -1,6 +1,6 @@
 # TicketBase app image. Paired with docker-compose.yml, which also runs
-# Postgres - together, `docker compose up` runs the whole stack, not
-# just the database.
+# Postgres and a separate one-shot migration step - together, `docker
+# compose up` runs the whole stack correctly, not just the database.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -12,8 +12,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Applies any pending Alembic migrations, then starts the API. Using
-# migrations here (not Base.metadata.create_all) is the production path -
-# see the "Migrations" section in README.md for why that distinction
-# matters.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Non-root: running the app process as root inside the container is an
+# unnecessary privilege - if the process is ever compromised, root
+# inside the container is a meaningfully worse outcome than a
+# dedicated unprivileged user has, even though the container boundary
+# itself adds separate isolation. This was specifically flagged
+# against this project's Dockerfile before being fixed.
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Deliberately does NOT run migrations here. An earlier version ran
+# `alembic upgrade head && uvicorn ...` as the container's own startup
+# command - meaning migrations ran on EVERY container start, including
+# every replica in a multi-instance deployment starting concurrently
+# (a real race condition risk) and every restart, not just real
+# releases. Migrations now run as their own one-shot step (see
+# docker-compose.yml's `migrate` service) that the app service waits on
+# before starting - "run migrations once during release, not in every
+# web/worker startup."
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

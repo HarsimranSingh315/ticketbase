@@ -20,11 +20,18 @@ Visit `http://127.0.0.1:8000/` for the web UI — create tickets, filter by
 status, view details, confirm categories, and update status, all from
 the browser.
 
-Or run the whole stack (app + Postgres) with Docker:
+Or run the whole stack (Postgres + a one-shot migration + the app) with
+Docker:
 
 ```bash
+cp .env.example .env   # required - the app/migrate containers read real config from this file
 docker compose up --build
 ```
+
+The `migrate` service applies Alembic migrations once and exits before
+`app` starts - not on every container start (see the Dockerfile and
+docker-compose.yml for why that distinction matters for a real
+deployment). The app container also runs as a non-root user.
 
 In a second terminal, use the CLI:
 
@@ -238,20 +245,46 @@ should run migrations explicitly before starting the app (see the
 Dockerfile).
 
 **Full containerization** — `Dockerfile` for the app, `docker-compose.yml`
-now runs the app *and* Postgres together (`docker compose up --build`),
-with a Postgres healthcheck gating app startup and migrations running
-automatically before the app boots. Honest caveat: this sandbox has no
-Docker daemon, so I couldn't actually run `docker compose up` here - I
-verified every piece it depends on independently (migrations apply
-cleanly, `requirements.txt` installs cleanly, the app starts and serves
-correctly), but the compose file itself is untested end-to-end. Worth
-running yourself before calling it "deployed."
+runs Postgres, a one-shot migration step, and the app together
+(`docker compose up --build`), with a Postgres healthcheck gating the
+migration step and the migration completing successfully gating app
+startup. Updated in a later session to close three gaps a production
+review found: the app container now runs as a **non-root user**;
+migrations run **once, as their own step**, not on every container
+start (the earlier version ran `alembic upgrade head` as part of the
+app's own `CMD`, which would re-run on every restart and race against
+itself with multiple replicas); and a proper **`.dockerignore`** now
+exists (previously missing entirely), explicitly excluding `.env` so a
+real secret can never end up baked into an image layer - runtime config
+is passed in via `env_file: .env` instead, which docker-compose reads
+locally at container-start time without copying it into the image.
+Honest caveat, unchanged from before: this sandbox still has no Docker
+daemon, so `docker compose up` itself remains unrun here. What I could
+and did verify: the compose YAML parses correctly and its service
+dependency graph is structurally correct (checked with a real YAML
+parser, shown in the file's own history), the `alembic upgrade head`
+command it runs has been run directly dozens of times this project
+against both SQLite and real Postgres, and the non-root `useradd`
+Dockerfile syntax is standard. The full `docker compose up --build`
+run itself is still worth doing yourself before calling this deployed.
 
-**CI (`.github/workflows/ci.yml`)** — runs the full test suite and
-checks the Alembic migration applies cleanly, on every push/PR. I
-simulated the exact steps locally (fresh dependency install, `pytest`,
-`alembic upgrade head` against a clean DB) and confirmed they pass; the
-workflow itself only runs once this repo is actually pushed to GitHub.
+**CI (`.github/workflows/ci.yml`)** — runs the full test suite *twice*
+per push/PR: once against SQLite (fast, zero-setup default) and once
+against a real Postgres 16 service container GitHub Actions runs and
+health-checks automatically, using the same `tests/conftest.py`
+(parametrized via `TEST_DATABASE_URL` - defaults to SQLite locally, set
+to Postgres in CI). Also checks the Alembic migration applies cleanly
+against both databases, including specifically the upgrade-from-a-
+prior-schema-with-existing-data scenario that this project's own
+migration originally broke on (see "Two real bugs found" above) - a
+real regression check, not a hypothetical one, since that exact bug
+already happened once. I couldn't run GitHub Actions itself from this
+sandbox, so instead I ran every one of these steps' exact commands by
+hand against a real local Postgres server and confirmed each one
+individually before writing the YAML - including the schema-reset,
+migration, data-insertion, and verification steps for the upgrade
+scenario. The workflow only runs for real once this repo is pushed to
+GitHub.
 
 **API hygiene** — `GET /tickets` now takes `limit`/`offset` (capped by
 `MAX_PAGE_SIZE`) instead of always returning everything; `/health` now

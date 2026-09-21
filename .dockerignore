@@ -1,0 +1,24 @@
+# Never bake these into the image - .env especially, since it can
+# contain real secrets (SECRET_KEY, API_KEY, LLM_API_KEY, bootstrap
+# admin credentials). docker-compose.yml passes these in at runtime via
+# `env_file:` instead, which does NOT copy the file into the image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.github
+
+# Local dev artifacts that should never end up in a built image.
+*.db
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Not needed at runtime - smaller image, faster builds.
+tests/
+docs/
+README.md

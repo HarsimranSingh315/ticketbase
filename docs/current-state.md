@@ -368,3 +368,103 @@ rough priority order: wire Postgres into the automated test suite/CI
 (now proven to work, not yet automated); Milestone 2 (reviewed email
 drafts with a real approval + delivery workflow); or CLI auth/config
 improvements (still an open item from the original brief review).
+
+---
+
+## Closing the tracked backlog (before starting Milestone 2)
+
+Three items had been explicitly flagged as open across the sections
+above and kept getting deferred. Closed all three in one session,
+each with real verification, before moving forward.
+
+### 1. Postgres wired into automated CI (previously: manual scripts only)
+
+`tests/conftest.py`'s database is now configurable via
+`TEST_DATABASE_URL` (defaults to SQLite in-memory - zero setup for
+local dev). `.github/workflows/ci.yml` now runs the *entire* 84-test
+suite twice per push: once against SQLite, once against a real
+Postgres 16 service container that GitHub Actions runs and
+health-checks automatically. It also runs the Alembic migration check
+against Postgres twice - once from empty, and once specifically
+reproducing the upgrade-with-existing-data scenario that this
+project's own migration broke on before (see the Milestone 1 section
+above) - a real regression check, not a hypothetical one.
+
+I can't run GitHub Actions itself from this sandbox, so I verified
+this the same way as everything else in this project: by running every
+individual command the workflow file contains, by hand, against a real
+local Postgres server, and confirming each one before writing the YAML
+- including the full 84-test suite passing against Postgres via
+`TEST_DATABASE_URL=postgresql://... pytest`, and the schema-reset →
+migrate → insert-a-ticket → migrate-to-head → verify sequence for the
+upgrade-with-data check.
+
+### 2. CLI: configurable + auth + timeouts (previously: hardcoded, and quietly broken)
+
+`cli.py` now reads `TICKETBASE_API_URL`, `TICKETBASE_API_KEY`, and
+`TICKETBASE_TIMEOUT` from the environment instead of a hardcoded
+`API_BASE` constant with no auth support at all. 401s, connection
+failures, and timeouts now produce a clear one-line message instead of
+a raw `requests` traceback.
+
+While fixing this, found that **the CLI was already broken against the
+current API**: `status` and `confirm-category` never sent the
+`version` field that ticket writes have required since Milestone 1's
+optimistic-concurrency work - every real call would have 422'd. Fixed
+by having both commands fetch the ticket first to get its current
+version, which also means a genuine version conflict now surfaces as a
+clear "run the command again" message instead of a generic HTTP error.
+Verified against a real running server, with `API_KEY` actually
+enabled: confirmed a missing/wrong key fails with a clear message, a
+correct key works, `status` and `confirm-category` both succeed (proving
+the version fix), and an unreachable URL fails cleanly rather than
+throwing a stack trace. 9 new tests (mocked, so they don't need a live
+server for every future test run) cover the same ground permanently.
+
+### 3. Docker: non-root, `.dockerignore`, and migrations as a real release step
+
+Three gaps, all fixed together since they touch the same two files:
+
+- **No `.dockerignore` existed at all.** Added one - notably excluding
+  `.env`, so a real secret can never end up baked into an image layer.
+- **The app container ran as root.** Fixed with a dedicated `appuser`
+  in the Dockerfile.
+- **Migrations ran on every container start** (`alembic upgrade head &&
+  uvicorn ...` as the app's own `CMD`) rather than once per release -
+  a real risk with multiple replicas starting concurrently, not just a
+  style preference. Split into a separate one-shot `migrate` service in
+  `docker-compose.yml` that the `app` service waits on
+  (`depends_on: migrate: condition: service_completed_successfully`)
+  before starting.
+- Runtime config (the growing list of `SECRET_KEY`, `LLM_API_KEY`,
+  `BOOTSTRAP_ADMIN_*`, etc.) is now forwarded via `env_file: .env` on
+  both the `migrate` and `app` services, instead of needing each new
+  setting manually added to `docker-compose.yml` by name as the config
+  surface grows - `.env` is read locally by compose at container-start
+  time, never copied into the image.
+
+Honest limitation, unchanged from every earlier mention of Docker in
+this document: **this sandbox still has no Docker daemon**, so
+`docker compose up --build` itself remains unrun here. What was
+verified: the compose YAML parses correctly and its service dependency
+graph is structurally sound (checked with a real YAML parser), and the
+`alembic upgrade head` command the `migrate` service runs has itself
+been run directly many times this project, against both SQLite and
+real Postgres. The actual `docker compose up --build` run is still
+worth doing yourself before calling this deployed - flagged the same
+way, not silently assumed fixed.
+
+### Test suite
+
+```
+$ python -m pytest -q
+84 passed, 3 warnings
+```
+
+### Next milestone
+
+The explicitly-tracked backlog is now closed. Milestone 2 (reviewed
+email drafts: persisted drafts, an explicit approval step, a
+transactional outbox, a durable worker, a local mail sink by default
+and a real provider adapter when configured) is the next substantial
+piece of new product surface, per the brief's own milestone ordering.
