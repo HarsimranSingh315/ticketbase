@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ customer.name }} — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/customers" class="back-link">← All customers</a>
+
+<section class="panel">
+    <span class="case-id">Customer #{{ customer.id }}</span>
+    <h1 class="case-headline">{{ customer.name }}</h1>
+</section>
+
+<section class="panel">
+    <h2>Contacts</h2>
+    {% if contacts %}
+        <ul class="related-list">
+            {% for contact in contacts %}
+            <li>
+                <span>{{ contact.name }}</span>
+                <span class="related-meta">
+                    {% if contact.email %}<span class="sim">{{ contact.email }}</span>{% endif %}
+                    {% if contact.phone %}<span class="sim">{{ contact.phone }}</span>{% endif %}
+                </span>
+            </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p class="no-record">No contacts yet</p>
+    {% endif %}
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/customers/{{ customer.id }}/contacts" class="stack-form" style="margin-top: 12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="text" name="name" placeholder="Contact name" required>
+        <input type="email" name="email" placeholder="Email (optional)">
+        <input type="text" name="phone" placeholder="Phone (optional)">
+        <button type="submit" class="btn btn-quiet">Add contact</button>
+    </form>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Ticket history</h2>
+    <p class="hint" style="margin-top: -6px; margin-bottom: 12px;">
+        This customer's exact tickets — not semantically similar ones from
+        other customers. See a ticket's own "Related tickets" section for
+        that kind of match instead.
+    </p>
+    {% if tickets %}
+        <table class="ledger">
+            <tbody>
+                {% for t in tickets %}
+                <tr>
+                    <td class="ledger-id">
+                        <span class="priority-tick {{ t.priority.value }}"></span>
+                        #{{ t.id }}
+                    </td>
+                    <td class="ledger-desc"><a href="/ui/tickets/{{ t.id }}">{{ t.description }}</a></td>
+                    <td class="ledger-meta"><span class="tag tag-status-{{ t.status.value }}">{{ t.status.value|replace('_', ' ') }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="empty-state">No tickets linked to this customer yet.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

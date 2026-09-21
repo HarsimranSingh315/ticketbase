@@ -6,17 +6,92 @@ architectural choice: it means the core logic isn't tangled up with HTTP
 concerns (status codes, request parsing). You could swap FastAPI for
 something else later and reuse everything in this file unchanged.
 """
+import json
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
 from sqlalchemy.orm import Session
+
 from app import models
+from app.models import User, Session as SessionModel, Invite, UserRole, Customer, Contact, AuditEvent
 from app.rules import compute_priority
+from app.security import hash_password, generate_token
 
 
-def create_ticket(db: Session, description: str) -> models.Ticket:
+def _utcnow() -> datetime:
+    """Naive UTC now - datetime.utcnow() is deprecated on newer Python,
+    but a naive datetime is what this project's plain DateTime columns
+    actually store/return on both SQLite and Postgres (see
+    get_active_session's docstring for why naive-vs-aware consistency
+    matters here). This is the non-deprecated equivalent."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class VersionConflict(Exception):
+    """
+    Raised when a write's expected_version doesn't match the ticket's
+    actual current version in the database - i.e. someone else changed
+    it since the caller last read it. This is optimistic concurrency
+    control: rather than locking the row for the whole edit, we let the
+    write proceed only if nothing else won the race first, and surface
+    a clear, specific error instead of silently overwriting a concurrent
+    change - the exact failure mode the brief calls out ("stale writes
+    with useful errors... concurrent ticket edits conflict safely").
+    """
+    def __init__(self, ticket_id: int, expected_version: int, actual_version: int):
+        self.ticket_id = ticket_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        super().__init__(
+            f"Ticket {ticket_id}: expected version {expected_version}, "
+            f"but it's actually at version {actual_version} - someone else changed it first."
+        )
+
+
+def _record_audit_event(db: Session, actor_user_id: Optional[int], action: str, resource_type: str, resource_id: int, details: Optional[dict] = None) -> None:
+    """
+    Writes one audit row. `actor_user_id` is nullable: a write made via
+    the shared JSON-API key (app/auth.py's require_api_key) has no real
+    per-human identity behind it - a shared secret can't prove WHICH
+    person acted, so recording a fake actor would be worse than
+    recording none. Writes made through the browser UI always have a
+    real logged-in user and always pass a real actor_user_id - see
+    main.py's UI routes.
+
+    Callers are responsible for committing in the SAME transaction as
+    the change this describes - see each write function below, where
+    the event add() happens before the single db.commit() that also
+    saves the actual change, so the two can never be partially
+    committed (one without the other).
+    """
+    event = AuditEvent(
+        actor_user_id=actor_user_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        details=json.dumps(details) if details is not None else None,
+    )
+    db.add(event)
+
+
+def get_audit_events_for_ticket(db: Session, ticket_id: int) -> list[AuditEvent]:
+    return (
+        db.query(AuditEvent)
+        .filter(AuditEvent.resource_type == "ticket", AuditEvent.resource_id == ticket_id)
+        .order_by(AuditEvent.created_at.asc())
+        .all()
+    )
+
+
+# --- Tickets ---
+
+def create_ticket(db: Session, description: str, customer_id: Optional[int] = None) -> models.Ticket:
     ticket = models.Ticket(
         description=description,
         priority=compute_priority(description),
         status=models.TicketStatus.open,
+        customer_id=customer_id,
     )
     db.add(ticket)
     db.commit()
@@ -68,6 +143,24 @@ def list_other_tickets(db: Session, exclude_id: int, limit: int = 300) -> list[m
     )
 
 
+def get_customer_tickets(db: Session, customer_id: int, limit: int = 50) -> list[models.Ticket]:
+    """
+    A customer's EXACT ticket history - filtered by the real
+    `customer_id` foreign key, not similarity. Deliberately separate
+    from app/related_tickets.py's semantic matching: the brief is
+    explicit that these two must never be conflated, since a
+    similar-sounding ticket from a DIFFERENT customer is not that
+    customer's history and must never be presented as if it were.
+    """
+    return (
+        db.query(models.Ticket)
+        .filter(models.Ticket.customer_id == customer_id)
+        .order_by(models.Ticket.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def get_ticket_stats(db: Session) -> dict:
     """
     Counts for the ledger's "at a glance" header. Real, queried numbers -
@@ -96,47 +189,180 @@ def get_ticket_stats(db: Session) -> dict:
     }
 
 
-def update_status(db: Session, ticket_id: int, status: str) -> Optional[models.Ticket]:
+def update_status(db: Session, ticket_id: int, status: str, expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
+    """
+    Raises VersionConflict if `expected_version` doesn't match the
+    ticket's current version (someone else changed it first). Returns
+    None if the ticket doesn't exist. Writes an audit event in the same
+    transaction as the status change.
+    """
     ticket = get_ticket(db, ticket_id)
     if ticket is None:
         return None
+    if ticket.version != expected_version:
+        raise VersionConflict(ticket_id, expected_version, ticket.version)
+
+    old_status = ticket.status.value if hasattr(ticket.status, "value") else ticket.status
     ticket.status = status
+    ticket.version += 1
+    _record_audit_event(
+        db, actor_user_id, "ticket.status_changed", "ticket", ticket_id,
+        details={"from": old_status, "to": status},
+    )
     db.commit()
     db.refresh(ticket)
     return ticket
 
 
-def confirm_category(db: Session, ticket_id: int, category: str) -> Optional[models.Ticket]:
+def confirm_category(db: Session, ticket_id: int, category: str, expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
     """
     Sets the CONFIRMED category. This is the human-review gate in action:
     nothing else in the system is allowed to set category_confirmed=True
-    except this explicit function, called from an explicit user action.
+    except this explicit function, called from an explicit user action -
+    and now, unlike before, WHO confirmed it and WHEN is recorded too
+    (an audit event), not just that it happened. Raises VersionConflict
+    on a stale write, same as update_status.
     """
     ticket = get_ticket(db, ticket_id)
     if ticket is None:
         return None
+    if ticket.version != expected_version:
+        raise VersionConflict(ticket_id, expected_version, ticket.version)
+
+    old_category = ticket.category
     ticket.category = category
     ticket.category_confirmed = 1
+    ticket.version += 1
+    _record_audit_event(
+        db, actor_user_id, "ticket.category_confirmed", "ticket", ticket_id,
+        details={"from": old_category, "to": category},
+    )
     db.commit()
     db.refresh(ticket)
     return ticket
 
 
+def assign_ticket(db: Session, ticket_id: int, assignee_user_id: Optional[int], expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
+    """Assigns (or, with assignee_user_id=None, unassigns) a ticket.
+    Same version-conflict and audit-trail pattern as the other writes."""
+    ticket = get_ticket(db, ticket_id)
+    if ticket is None:
+        return None
+    if ticket.version != expected_version:
+        raise VersionConflict(ticket_id, expected_version, ticket.version)
+
+    old_assignee = ticket.assignee_id
+    ticket.assignee_id = assignee_user_id
+    ticket.version += 1
+    _record_audit_event(
+        db, actor_user_id, "ticket.assigned", "ticket", ticket_id,
+        details={"from": old_assignee, "to": assignee_user_id},
+    )
+    db.commit()
+    db.refresh(ticket)
+    return ticket
+
+
+def link_ticket_to_customer(db: Session, ticket_id: int, customer_id: Optional[int], expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
+    """Links (or unlinks) a ticket to a customer record."""
+    ticket = get_ticket(db, ticket_id)
+    if ticket is None:
+        return None
+    if ticket.version != expected_version:
+        raise VersionConflict(ticket_id, expected_version, ticket.version)
+
+    old_customer = ticket.customer_id
+    ticket.customer_id = customer_id
+    ticket.version += 1
+    _record_audit_event(
+        db, actor_user_id, "ticket.customer_linked", "ticket", ticket_id,
+        details={"from": old_customer, "to": customer_id},
+    )
+    db.commit()
+    db.refresh(ticket)
+    return ticket
+
+
+# --- Customers & contacts ---
+
+def normalize_phone(raw: str) -> str:
+    """
+    Strips everything except a leading `+` and digits, then strips a
+    US/Canada country code if present, so "+1 (555) 123-4567" and
+    "555-123-4567" - both realistic ways the SAME number gets entered -
+    normalize to the same value. NOT full E.164 validation or
+    international region handling - a real phone integration
+    (Milestone 4) would use a proper library (e.g. libphonenumber) for
+    that. This is enough to make exact-match lookup work for
+    consistently-entered US contact data, and is a deliberately named
+    simplification, not a hidden one. (Confirmed via a real test with
+    two differently-formatted versions of the same number - without the
+    country-code stripping below, they didn't match.)
+    """
+    if not raw:
+        return ""
+    digits = re.sub(r"[^\d+]", "", raw)
+    if digits.startswith("+1") and len(digits) == 12:
+        digits = digits[2:]
+    elif digits.startswith("1") and len(digits) == 11:
+        digits = digits[1:]
+    return digits
+
+
+def create_customer(db: Session, name: str, notes: Optional[str] = None) -> Customer:
+    customer = Customer(name=name, notes=notes)
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    return customer
+
+
+def get_customer(db: Session, customer_id: int) -> Optional[Customer]:
+    return db.query(Customer).filter(Customer.id == customer_id).first()
+
+
+def search_customers(db: Session, q: Optional[str] = None, limit: int = 20) -> list[Customer]:
+    query = db.query(Customer)
+    if q:
+        query = query.filter(Customer.name.ilike(f"%{q}%"))
+    return query.order_by(Customer.name.asc()).limit(limit).all()
+
+
+def create_contact(db: Session, customer_id: int, name: str, email: Optional[str] = None, phone: Optional[str] = None) -> Contact:
+    contact = Contact(
+        customer_id=customer_id, name=name, email=email, phone=phone,
+        normalized_phone=normalize_phone(phone) if phone else None,
+    )
+    db.add(contact)
+    db.commit()
+    db.refresh(contact)
+    return contact
+
+
+def get_contact(db: Session, contact_id: int) -> Optional[Contact]:
+    return db.query(Contact).filter(Contact.id == contact_id).first()
+
+
+def list_contacts_for_customer(db: Session, customer_id: int) -> list[Contact]:
+    return db.query(Contact).filter(Contact.customer_id == customer_id).order_by(Contact.name.asc()).all()
+
+
+def find_contacts_by_phone(db: Session, raw_phone: str) -> list[Contact]:
+    """
+    Caller-ID-style lookup by phone number. Returns a LIST, not a single
+    contact - the brief is explicit that a phone number is a lookup
+    hint, not identity verification (numbers can be shared, recycled,
+    or simply match more than one saved contact), so the caller of this
+    function must still have an agent confirm which (if any) result is
+    actually the right person before linking or disclosing anything.
+    """
+    normalized = normalize_phone(raw_phone)
+    if not normalized:
+        return []
+    return db.query(Contact).filter(Contact.normalized_phone == normalized).all()
+
+
 # --- Agent identity (Milestone 1) ---
-
-from datetime import datetime, timezone, timedelta
-
-
-def _utcnow() -> datetime:
-    """Naive UTC now - _utcnow() is deprecated on newer Python,
-    but a naive datetime is what this project's plain DateTime columns
-    actually store/return on both SQLite and Postgres (see
-    get_active_session's docstring for why naive-vs-aware consistency
-    matters here). This is the non-deprecated equivalent."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-from app.models import User, Session as SessionModel, Invite, UserRole
-from app.security import hash_password, generate_token
-
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
@@ -144,6 +370,17 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
 
 def get_user(db: Session, user_id: int) -> Optional[User]:
     return db.query(User).filter(User.id == user_id).first()
+
+
+def list_agents(db: Session) -> list[User]:
+    """Active admin/agent users - for populating an assignment dropdown.
+    Reviewers are excluded since they can't be assigned work."""
+    return (
+        db.query(User)
+        .filter(User.is_active == True, User.role.in_([UserRole.admin, UserRole.agent]))  # noqa: E712
+        .order_by(User.name.asc())
+        .all()
+    )
 
 
 def create_user(db: Session, email: str, name: str, password: str, role: UserRole) -> User:

@@ -50,7 +50,7 @@ def test_get_nonexistent_ticket_returns_404(client):
 def test_list_tickets_filters_by_status(client):
     client.post("/tickets", json={"description": "ticket one"})
     ticket_two = client.post("/tickets", json={"description": "ticket two"}).json()
-    client.patch(f"/tickets/{ticket_two['id']}/status", json={"status": "resolved"})
+    client.patch(f"/tickets/{ticket_two['id']}/status", json={"status": "resolved", "version": 1})
     open_tickets = client.get("/tickets", params={"status": "open"}).json()
     resolved_tickets = client.get("/tickets", params={"status": "resolved"}).json()
     assert len(open_tickets) == 1
@@ -62,20 +62,20 @@ def test_category_confirmation_is_a_separate_explicit_step(client):
     ticket = client.post("/tickets", json={"description": "WiFi keeps dropping"}).json()
     assert ticket["category"] is None
     assert ticket["category_confirmed"] is False
-    resp = client.patch(f"/tickets/{ticket['id']}/category", json={"category": "connectivity"})
+    resp = client.patch(f"/tickets/{ticket['id']}/category", json={"category": "connectivity", "version": 1})
     updated = resp.json()
     assert updated["category"] == "connectivity"
     assert updated["category_confirmed"] is True
 
 
 def test_update_status_on_nonexistent_ticket_returns_404(client):
-    resp = client.patch("/tickets/9999/status", json={"status": "resolved"})
+    resp = client.patch("/tickets/9999/status", json={"status": "resolved", "version": 1})
     assert resp.status_code == 404
 
 
 def test_invalid_status_value_is_rejected(client):
     ticket = client.post("/tickets", json={"description": "test"}).json()
-    resp = client.patch(f"/tickets/{ticket['id']}/status", json={"status": "not_a_real_status"})
+    resp = client.patch(f"/tickets/{ticket['id']}/status", json={"status": "not_a_real_status", "version": 1})
     assert resp.status_code == 422
 
 
@@ -99,7 +99,7 @@ def test_list_tickets_search_by_description(client):
 def test_list_tickets_search_combines_with_status_filter(client):
     t1 = client.post("/tickets", json={"description": "VPN connection issue"}).json()
     t2 = client.post("/tickets", json={"description": "VPN certificate expired"}).json()
-    client.patch(f"/tickets/{t2['id']}/status", json={"status": "resolved"})
+    client.patch(f"/tickets/{t2['id']}/status", json={"status": "resolved", "version": 1})
 
     open_vpn = client.get("/tickets", params={"q": "VPN", "status": "open"}).json()
     assert len(open_vpn) == 1

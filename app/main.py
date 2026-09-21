@@ -163,7 +163,10 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
 
 @app.patch("/tickets/{ticket_id}/status", response_model=schemas.TicketOut, dependencies=[Depends(require_api_key)])
 def update_ticket_status(ticket_id: int, payload: schemas.TicketStatusUpdate, db: Session = Depends(get_db)):
-    ticket = crud.update_status(db, ticket_id, payload.status)
+    try:
+        ticket = crud.update_status(db, ticket_id, payload.status, expected_version=payload.version)
+    except crud.VersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     return ticket
@@ -175,9 +178,15 @@ def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfi
     Confirms a ticket's category. A human types this in directly, or an
     AI-suggested category (from /suggest) pre-fills it - but this exact
     same explicit confirmation call is still required either way. The AI
-    never gets a shortcut around this endpoint.
+    never gets a shortcut around this endpoint. `payload.version` must
+    match the ticket's current version (optimistic concurrency - see
+    crud.VersionConflict) - a stale write is rejected with 409, not
+    silently applied over a change someone else already made.
     """
-    ticket = crud.confirm_category(db, ticket_id, payload.category)
+    try:
+        ticket = crud.confirm_category(db, ticket_id, payload.category, expected_version=payload.version)
+    except crud.VersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     return ticket
@@ -460,8 +469,31 @@ def ui_ticket_detail(
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
     return templates.TemplateResponse(
         request, "ticket_detail.html",
-        {"ticket": ticket, "related_tickets": related, "user": user, "csrf_token": csrf_token_for_template(request, settings)},
+        _ticket_detail_context(db, ticket, related, user, request, settings),
     )
+
+
+def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, request: Request, settings: Settings, suggestion=None, conflict_error: Optional[str] = None) -> dict:
+    """Shared context-building for every route that renders
+    ticket_detail.html, so each one doesn't have to remember every
+    field (customer, assignee, agents list, audit trail) individually."""
+    customer = crud.get_customer(db, ticket.customer_id) if ticket.customer_id else None
+    assignee = crud.get_user(db, ticket.assignee_id) if ticket.assignee_id else None
+    agents = crud.list_agents(db)
+    audit_events = crud.get_audit_events_for_ticket(db, ticket.id)
+    audit_actors = {a.id: a for a in agents}
+    for event in audit_events:
+        if event.actor_user_id and event.actor_user_id not in audit_actors:
+            actor = crud.get_user(db, event.actor_user_id)
+            if actor:
+                audit_actors[actor.id] = actor
+    return {
+        "ticket": ticket, "related_tickets": related_tickets, "user": user,
+        "csrf_token": csrf_token_for_template(request, settings),
+        "customer": customer, "assignee": assignee, "agents": agents,
+        "audit_events": audit_events, "audit_actors": audit_actors,
+        "suggestion": suggestion, "conflict_error": conflict_error,
+    }
 
 
 @app.post("/ui/tickets/{ticket_id}/suggest", dependencies=[Depends(require_agent)])
@@ -479,26 +511,137 @@ def ui_suggest_category(
     suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    user = get_current_user(request, db)
     return templates.TemplateResponse(
         request, "ticket_detail.html",
+        _ticket_detail_context(db, ticket, related, user, request, rag_settings, suggestion=suggestion),
+    )
+
+
+@app.post("/ui/tickets/{ticket_id}/status", dependencies=[Depends(require_csrf)])
+def ui_update_status(
+    request: Request, ticket_id: int, status: str = Form(...), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    try:
+        ticket = crud.update_status(db, ticket_id, status, expected_version=version, actor_user_id=user.id)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+@app.post("/ui/tickets/{ticket_id}/category", dependencies=[Depends(require_csrf)])
+def ui_confirm_category(
+    request: Request, ticket_id: int, category: str = Form(...), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    try:
+        ticket = crud.confirm_category(db, ticket_id, category, expected_version=version, actor_user_id=user.id)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+@app.post("/ui/tickets/{ticket_id}/assign", dependencies=[Depends(require_csrf)])
+def ui_assign_ticket(
+    request: Request, ticket_id: int, assignee_id: Optional[str] = Form(default=None), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    # assignee_id is deliberately optional, not required-but-sometimes-
+    # empty: a blank/absent value means "unassign", and FastAPI/Starlette
+    # treats an empty-string form field as MISSING for a required
+    # Form(...) param (confirmed directly - it 422s with "Field
+    # required" rather than delivering ""), so making it required would
+    # make unassigning impossible through this route.
+    parsed_assignee_id = int(assignee_id) if assignee_id else None
+    try:
+        ticket = crud.assign_ticket(db, ticket_id, parsed_assignee_id, expected_version=version, actor_user_id=user.id)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+@app.post("/ui/tickets/{ticket_id}/customer", dependencies=[Depends(require_csrf)])
+def ui_link_customer(
+    request: Request, ticket_id: int, customer_id: int = Form(...), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    if crud.get_customer(db, customer_id) is None:
+        raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
+    try:
+        ticket = crud.link_ticket_to_customer(db, ticket_id, customer_id, expected_version=version, actor_user_id=user.id)
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User, settings: Settings):
+    """
+    Shared handling for a VersionConflict on any ticket write: re-render
+    the ticket page with the ticket's REAL current data (so the form the
+    agent sees is no longer stale) and a clear explanation of what
+    happened, rather than a generic error page or - worse - retrying
+    the write blind.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    context = _ticket_detail_context(
+        db, ticket, related, user, request, settings,
+        conflict_error="This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
+    )
+    return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=409)
+
+
+# --- Customers (Milestone 1: exact customer history, separate from
+# semantic related tickets - see crud.get_customer_tickets's docstring) ---
+
+@app.get("/customers")
+def ui_customers_list(request: Request, q: Optional[str] = None, db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+    customers = crud.search_customers(db, q=q)
+    return templates.TemplateResponse(
+        request, "customers.html",
+        {"customers": customers, "current_q": q, "user": user, "csrf_token": csrf_token_for_template(request, settings)},
+    )
+
+
+@app.post("/customers", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_create_customer(request: Request, name: str = Form(...), db: Session = Depends(get_db)):
+    customer = crud.create_customer(db, name=name)
+    return RedirectResponse(url=f"/customers/{customer.id}", status_code=303)
+
+
+@app.get("/customers/{customer_id}")
+def ui_customer_detail(request: Request, customer_id: int, db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+    customer = crud.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
+    contacts = crud.list_contacts_for_customer(db, customer_id)
+    tickets = crud.get_customer_tickets(db, customer_id)
+    return templates.TemplateResponse(
+        request, "customer_detail.html",
         {
-            "ticket": ticket, "suggestion": suggestion, "related_tickets": related,
-            "user": get_current_user(request, db), "csrf_token": csrf_token_for_template(request, rag_settings),
+            "customer": customer, "contacts": contacts, "tickets": tickets,
+            "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )
 
 
-@app.post("/ui/tickets/{ticket_id}/status", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
-def ui_update_status(ticket_id: int, status: str = Form(...), db: Session = Depends(get_db)):
-    ticket = crud.update_status(db, ticket_id, status)
-    if ticket is None:
-        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
-
-
-@app.post("/ui/tickets/{ticket_id}/category", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
-def ui_confirm_category(ticket_id: int, category: str = Form(...), db: Session = Depends(get_db)):
-    ticket = crud.confirm_category(db, ticket_id, category)
-    if ticket is None:
-        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+@app.post("/customers/{customer_id}/contacts", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_create_contact(request: Request, customer_id: int, name: str = Form(...), email: str = Form(default=""), phone: str = Form(default=""), db: Session = Depends(get_db)):
+    if crud.get_customer(db, customer_id) is None:
+        raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
+    crud.create_contact(db, customer_id=customer_id, name=name, email=email or None, phone=phone or None)
+    return RedirectResponse(url=f"/customers/{customer_id}", status_code=303)

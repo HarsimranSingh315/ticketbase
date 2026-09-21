@@ -23,13 +23,20 @@ class TicketCreate(BaseModel):
 
 
 class TicketStatusUpdate(BaseModel):
-    """What a client sends to change a ticket's status."""
+    """What a client sends to change a ticket's status. `version` is the
+    ticket's version as the client last read it - required so a stale
+    write (based on outdated data) is rejected as a clear 409 conflict
+    instead of silently overwriting a concurrent change. See
+    crud.VersionConflict."""
     status: TicketStatus
+    version: int
 
 
 class TicketCategoryConfirm(BaseModel):
-    """What a client sends to confirm (or override) a ticket's category."""
+    """What a client sends to confirm (or override) a ticket's category.
+    See TicketStatusUpdate's docstring for why `version` is required."""
     category: str = Field(..., min_length=1, max_length=100)
+    version: int
 
 
 class TicketOut(BaseModel):
@@ -42,6 +49,9 @@ class TicketOut(BaseModel):
     category_confirmed: bool = False
     status: TicketStatus
     priority: TicketPriority
+    customer_id: Optional[int] = None
+    assignee_id: Optional[int] = None
+    version: int
     created_at: datetime
 
 
@@ -73,3 +83,29 @@ class RelatedTicketOut(BaseModel):
     description: str
     status: str
     similarity: float
+
+
+class CustomerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class ContactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    customer_id: int
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class AuditEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    actor_user_id: Optional[int] = None
+    action: str
+    details: Optional[str] = None
+    created_at: datetime

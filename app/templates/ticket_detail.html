@@ -5,6 +5,10 @@
 
 <a href="/" class="back-link">← All tickets</a>
 
+{% if conflict_error %}
+<div class="error-banner">{{ conflict_error }}</div>
+{% endif %}
+
 <section class="panel">
     <span class="case-id">#{{ ticket.id }}</span>
     <h1 class="case-headline">{{ ticket.description }}</h1>
@@ -12,8 +16,45 @@
         <li><b>{{ ticket.priority.value|capitalize }}</b> priority</li>
         <li><b>{{ ticket.status.value|replace('_', ' ')|capitalize }}</b></li>
         <li>Opened {{ ticket.created_at.strftime('%b %-d, %Y') }} at {{ ticket.created_at.strftime('%H:%M') }} UTC</li>
+        {% if assignee %}<li>Assigned to <b>{{ assignee.name }}</b></li>{% endif %}
     </ul>
 </section>
+
+<section class="panel">
+    <h2>Customer</h2>
+    {% if customer %}
+        <div class="record"><a href="/customers/{{ customer.id }}" style="color: inherit; text-decoration: none;">{{ customer.name }}</a></div>
+        <p class="hint">See the customer's full exact ticket history on their page — separate from the semantic "related tickets" below.</p>
+    {% else %}
+        <p class="no-record">Not linked to a customer</p>
+        {% if user.role.value != 'reviewer' %}
+        <form method="post" action="/ui/tickets/{{ ticket.id }}/customer" class="stack-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="version" value="{{ ticket.version }}">
+            <input type="number" name="customer_id" placeholder="Customer ID" required style="width: 110px;">
+            <button type="submit" class="btn btn-quiet">Link</button>
+            <a href="/customers" class="user-link" style="font-size: 13px;">Search customers →</a>
+        </form>
+        {% endif %}
+    {% endif %}
+</section>
+
+{% if user.role.value != 'reviewer' %}
+<section class="panel">
+    <h2>Assignment</h2>
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/assign" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <select name="assignee_id">
+            <option value="">Unassigned</option>
+            {% for agent in agents %}
+            <option value="{{ agent.id }}" {{ 'selected' if assignee and assignee.id == agent.id }}>{{ agent.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-quiet">Assign</button>
+    </form>
+</section>
+{% endif %}
 
 {% if related_tickets %}
 <section class="panel">
@@ -37,6 +78,7 @@
     {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets/{{ ticket.id }}/status" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
         <select name="status">
             <option value="open" {{ 'selected' if ticket.status.value == 'open' }}>Open</option>
             <option value="in_progress" {{ 'selected' if ticket.status.value == 'in_progress' }}>In progress</option>
@@ -57,10 +99,11 @@
     {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets/{{ ticket.id }}/category" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
         <input type="text" name="category" placeholder="e.g. connectivity, billing, hardware" required>
         <button type="submit" class="btn btn-quiet">Confirm category</button>
     </form>
-    <p class="hint">Confirming here does the same thing as the CLI's <code>confirm-category</code> command — nothing sets a category on its own.</p>
+    <p class="hint">Confirming here does the same thing as the CLI's <code>confirm-category</code> command — and is now recorded in the audit trail below with your name and the time.</p>
     {% endif %}
 </section>
 
@@ -109,5 +152,20 @@
     {% endif %}
     </div>
 </section>
+
+{% if audit_events %}
+<section class="panel">
+    <h2>Activity</h2>
+    <ul class="audit-list">
+        {% for event in audit_events %}
+        <li>
+            <span class="audit-actor">{{ audit_actors[event.actor_user_id].name if event.actor_user_id and event.actor_user_id in audit_actors else 'System (API key)' }}</span>
+            <span class="audit-action">{{ event.action|replace('ticket.', '')|replace('_', ' ') }}</span>
+            <span class="audit-time">{{ event.created_at.strftime('%b %-d, %H:%M') }} UTC</span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
 
 {% endblock %}

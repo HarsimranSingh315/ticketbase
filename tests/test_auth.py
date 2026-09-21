@@ -82,7 +82,7 @@ def test_ui_category_write_rejected_without_login(client):
 
     resp = client.post(
         f"/ui/tickets/{ticket['id']}/category",
-        data={"category": "hardware", "csrf_token": "irrelevant-no-session-exists"},
+        data={"category": "hardware", "csrf_token": "irrelevant-no-session-exists", "version": ticket["version"]},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -107,7 +107,7 @@ def test_ui_ticket_creation_rejected_without_login(client):
 def test_ui_status_update_rejected_without_login(client):
     ticket = client.post("/tickets", json={"description": "test"}).json()
     resp = client.post(
-        f"/ui/tickets/{ticket['id']}/status", data={"status": "resolved", "csrf_token": "x"},
+        f"/ui/tickets/{ticket['id']}/status", data={"status": "resolved", "csrf_token": "x", "version": ticket["version"]},
         follow_redirects=False,
     )
     assert resp.status_code == 303

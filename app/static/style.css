@@ -350,6 +350,20 @@ textarea:focus-visible, select:focus-visible {
 .related-meta { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .related-meta .sim { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
 
+.audit-list { list-style: none; padding: 0; margin: 0; }
+.audit-list li {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 13px;
+}
+.audit-list li:last-child { border-bottom: none; }
+.audit-actor { color: var(--ink); font-weight: 600; }
+.audit-action { color: var(--ink-muted); }
+.audit-time { color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; margin-left: auto; white-space: nowrap; }
+
 /* ---------- Status / category forms ---------- */
 
 .stack-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

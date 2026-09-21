@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Customers — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/" class="back-link">← All tickets</a>
+
+<section class="panel">
+    <h2>Customers</h2>
+    <form method="get" action="/customers" class="search-form" style="margin-bottom: 16px;">
+        <input type="search" name="q" value="{{ current_q or '' }}" placeholder="Search customer name…">
+    </form>
+
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/customers" class="stack-form" style="margin-bottom: 20px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="text" name="name" placeholder="New customer company name" required>
+        <button type="submit" class="btn btn-quiet">Create customer</button>
+    </form>
+    {% endif %}
+
+    {% if customers %}
+        <table class="ledger">
+            <tbody>
+                {% for c in customers %}
+                <tr>
+                    <td class="ledger-id">#{{ c.id }}</td>
+                    <td class="ledger-desc"><a href="/customers/{{ c.id }}">{{ c.name }}</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="empty-state">No customers {{ 'match "' + current_q + '"' if current_q else 'yet — create one above' }}.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

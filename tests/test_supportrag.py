@@ -42,7 +42,7 @@ def test_suggest_then_confirm_accepts_the_suggested_category(client):
     assert suggestion["abstained"] is False
 
     confirm_resp = client.patch(
-        f"/tickets/{ticket['id']}/category", json={"category": suggestion["category"]}
+        f"/tickets/{ticket['id']}/category", json={"category": suggestion["category"], "version": ticket["version"]}
     )
     assert confirm_resp.status_code == 200
     updated = confirm_resp.json()

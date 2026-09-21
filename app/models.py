@@ -46,6 +46,20 @@ class Ticket(Base):
     status = Column(SAEnum(TicketStatus), default=TicketStatus.open, nullable=False)
     priority = Column(SAEnum(TicketPriority), default=TicketPriority.medium, nullable=False)
 
+    # Nullable by design: existing tickets from before the customer model
+    # existed have no customer to point at, and the brief is explicit
+    # that migrating old data shouldn't mean deleting or faking it.
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    assignee_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    # Optimistic concurrency: every update must include the version it
+    # was read at (see crud.py's update functions). A stale write - one
+    # based on an older version than what's actually in the database -
+    # is rejected with a clear conflict rather than silently overwriting
+    # someone else's concurrent change. Starts at 1, not 0, so "the
+    # version I read" is never confused with "no version provided".
+    version = Column(Integer, nullable=False, default=1)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -126,6 +140,69 @@ class Invite(Base):
     created_at = Column(DateTime, default=_utcnow)
     expires_at = Column(DateTime, nullable=False)
     used_at = Column(DateTime, nullable=True)
+
+
+class Customer(Base):
+    """
+    A customer COMPANY - a record, not a tenant. Per the brief's product
+    decision: this is one support organization serving many customer
+    companies, not multi-tenant SaaS. Contacts (people) belong to a
+    customer; tickets link to a customer, optionally, through a contact.
+    """
+    __tablename__ = "customers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class Contact(Base):
+    """
+    A person at a customer company. `normalized_phone` strips everything
+    except leading `+` and digits (see crud.normalize_phone) so a
+    caller-ID lookup can match "+1 (555) 123-4567" against a contact
+    saved as "555-123-4567" - a real, if intentionally simple,
+    normalization; a production phone integration (Milestone 4) would
+    use a proper library (e.g. Google's libphonenumber) for full E.164
+    validation and region handling, which this deliberately doesn't do.
+    """
+    __tablename__ = "contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    normalized_phone = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class AuditEvent(Base):
+    """
+    An append-only record of who did what, to what, when. This exists
+    specifically to close a gap the production brief called out
+    correctly: `Ticket.category_confirmed` being a boolean is not proof
+    a human acted - there was no record of WHICH agent, or when. Every
+    write this project treats as a real decision (confirming a category,
+    changing status, assigning a ticket) should also write one of these,
+    in the same transaction as the change itself.
+
+    Deliberately generic (resource_type/resource_id, not a foreign key
+    per resource type) so one audit table covers tickets now and other
+    resource types later without a schema change each time - a small,
+    real tradeoff: it costs a join-by-convention instead of a real FK,
+    in exchange for not needing a new audit table per resource type.
+    """
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    action = Column(String, nullable=False)  # e.g. "ticket.category_confirmed"
+    resource_type = Column(String, nullable=False)  # e.g. "ticket"
+    resource_id = Column(Integer, nullable=False, index=True)
+    details = Column(Text, nullable=True)  # JSON-encoded extra context, e.g. {"category": "hardware"}
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class KnowledgeArticle(Base):
