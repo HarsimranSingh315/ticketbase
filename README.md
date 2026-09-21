@@ -35,6 +35,15 @@ python cli.py status 1 in_progress
 python cli.py confirm-category 1 connectivity
 ```
 
+Configurable via environment variables (no hardcoded values) if the
+server isn't on the default local address, or has `API_KEY` set:
+
+```bash
+export TICKETBASE_API_URL=https://tickets.example.com
+export TICKETBASE_API_KEY=your-api-key-here    # only needed if the server has API_KEY set
+export TICKETBASE_TIMEOUT=15                    # seconds, default 10
+```
+
 Both the web UI and the CLI call the exact same underlying `crud.py`
 functions - no logic is duplicated between them, only the presentation
 differs.
