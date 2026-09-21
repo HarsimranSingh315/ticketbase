@@ -10,6 +10,29 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # A real Postgres 16 service container - GitHub Actions runs and
+    # health-checks it automatically. The brief is explicit that
+    # Postgres should be authoritative for anything concurrency-
+    # sensitive, and this project has already found two real bugs
+    # (a NOT NULL column migration that only fails on non-empty tables,
+    # and a SQLite ALTER-TABLE limitation) that SQLite's more forgiving
+    # behavior didn't catch - see docs/current-state.md. This service
+    # is what tests/conftest.py's TEST_DATABASE_URL points at below.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ticketbase
+          POSTGRES_PASSWORD: ticketbase
+          POSTGRES_DB: ticketbase_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ticketbase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,14 +45,77 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run tests against SQLite (fast, zero-setup default)
         run: pytest -v
 
-      - name: Check Alembic migration applies cleanly
+      - name: Run the SAME test suite against real Postgres (authoritative)
+        env:
+          TEST_DATABASE_URL: postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci
+        run: pytest -v
+
+      - name: Check Alembic migration applies cleanly - SQLite (empty DB)
         run: |
           rm -f ci_migration_check.db
           DATABASE_URL="sqlite:///./ci_migration_check.db" alembic upgrade head
           rm -f ci_migration_check.db
+
+      - name: Reset the Postgres service DB to empty
+        run: |
+          python -c "
+          from sqlalchemy import create_engine, text
+          e = create_engine('postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci')
+          with e.connect() as conn:
+              conn.execute(text('DROP SCHEMA public CASCADE'))
+              conn.execute(text('CREATE SCHEMA public'))
+              conn.commit()
+          "
+
+      - name: Check Alembic migration applies cleanly - Postgres (empty DB)
+        env:
+          DATABASE_URL: postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci
+          SECRET_KEY: ci-migration-check-key
+        run: alembic upgrade head
+
+      - name: Reset the Postgres service DB to empty again
+        run: |
+          python -c "
+          from sqlalchemy import create_engine, text
+          e = create_engine('postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci')
+          with e.connect() as conn:
+              conn.execute(text('DROP SCHEMA public CASCADE'))
+              conn.execute(text('CREATE SCHEMA public'))
+              conn.commit()
+          "
+
+      - name: Check Postgres upgrade from a prior schema WITH existing ticket data
+        # A real regression check, not a hypothetical one: this
+        # project's Milestone-1 migration originally broke in exactly
+        # this scenario (a NOT NULL column with no default, added to a
+        # table that already had rows) - caught by hand before it ever
+        # shipped, see docs/current-state.md. This step exists so that
+        # class of bug can never silently come back.
+        env:
+          DATABASE_URL: postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci
+          SECRET_KEY: ci-migration-check-key
+        run: |
+          alembic upgrade 7420c85d3ce8
+          python -c "
+          from sqlalchemy import create_engine, text
+          e = create_engine('postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci')
+          with e.connect() as conn:
+              conn.execute(text(\"INSERT INTO tickets (description, status, priority) VALUES ('ci pre-existing ticket', 'open', 'medium')\"))
+              conn.commit()
+          "
+          alembic upgrade head
+          python -c "
+          from sqlalchemy import create_engine, text
+          e = create_engine('postgresql://ticketbase:ticketbase@localhost:5432/ticketbase_ci')
+          with e.connect() as conn:
+              row = conn.execute(text(\"SELECT version FROM tickets WHERE description='ci pre-existing ticket'\")).fetchone()
+              assert row is not None, 'pre-existing ticket did not survive the migration'
+              assert row[0] == 1, f'expected version=1 on the backfilled column, got {row[0]}'
+              print('Pre-existing ticket survived the migration with version =', row[0])
+          "
 
   python39-import-check:
     # This project has broken before from PEP 604 union syntax (`X | None`)

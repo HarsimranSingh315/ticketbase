@@ -25,6 +25,8 @@ shared by every test file, so there's only one override to clobber.
 Note on `get_rag_index`: it's overridden here for a related reason -
 see `override_get_rag_index`'s docstring below.
 """
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -35,12 +37,30 @@ from app.main import app, get_rag_index
 from app.database import Base, get_db
 from app.supportrag import build_rag_index
 
-TEST_DB_URL = "sqlite:///:memory:"
-engine = create_engine(
-    TEST_DB_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+# Defaults to a fast in-memory SQLite DB for local dev. Set
+# TEST_DATABASE_URL to a real Postgres URL to run the exact same suite
+# against Postgres instead - this is what CI does (see
+# .github/workflows/ci.yml), since the brief is explicit that Postgres
+# should be authoritative for anything concurrency-sensitive, and
+# SQLite's more forgiving behavior (e.g. no real ALTER TABLE constraint
+# support - see the Alembic migration debugging story in
+# docs/current-state.md) can hide real bugs. SQLite remains the local
+# default because it needs zero setup - a contributor without Postgres
+# installed can still run the full suite.
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "sqlite:///:memory:")
+
+if TEST_DB_URL.startswith("sqlite"):
+    engine = create_engine(
+        TEST_DB_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    # Postgres (or anything else): no SQLite-only connect_args/pool -
+    # psycopg2 doesn't accept check_same_thread, and StaticPool would
+    # serialize what should be a normal connection pool.
+    engine = create_engine(TEST_DB_URL)
+
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
