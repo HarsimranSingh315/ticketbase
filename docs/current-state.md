@@ -506,18 +506,34 @@ piece of new product surface, per the brief's own milestone ordering.
   `ResendAdapter` is a real integration, used only when
   `RESEND_API_KEY` is set.
 
-### An honest limitation, stated the same way as the LLM integration before it
+### Resend: now live-verified, not just unit-tested
 
-`ResendAdapter` is written and passes its own unit tests (mocked), but
-**has not been verified against a live Resend account** - there is no
-API key available in this environment. Same situation, same honesty,
-as `app/llm.py`'s Groq integration before a real key existed for it:
-if you configure a real `RESEND_API_KEY`, test it yourself before
-trusting it in anger. Real webhook signature validation for delivery/
-bounce callbacks is similarly not built - the local sink treats "sent"
-as terminal, which is honest for what it actually is (no real delivery
-concept without a real provider), but a live provider's async
-delivered/bounced callbacks are a real gap, not yet closed.
+`ResendAdapter` was originally written and unit-tested (mocked) but not
+verified against a live account - the same honest gap the Groq
+integration once had. That gap is now closed: the user obtained a real
+free Resend API key, configured it, drafted and approved a real message
+through the running app, and ran `worker.py` as a genuinely separate
+process against it. The worker's log line -
+`sent message 1 (job 1) to <redacted>@gmail.com,
+provider_id=01a0c5d7-909d-717d-a4b4-0ba92e7862f5` - shows a real
+Resend-issued email ID (not the local sink's `local-N` placeholder
+format), and the email was confirmed to have actually arrived in the
+recipient's real inbox. This is the strongest evidence category this
+project uses: a live account, a real send, and a human confirming
+delivery, not just an API returning 200.
+
+One real config detail this surfaced: Resend's free tier only allows
+sending from the default `onboarding@resend.dev` address and only to
+the exact email address the account signed up with, until a domain is
+verified - `MAIL_FROM_ADDRESS` needs to be set to
+`onboarding@resend.dev` accordingly for free-tier testing (documented
+in `.env.example`).
+
+Still not built: real webhook signature validation for delivery/bounce
+callbacks - the local sink and this live-tested happy path both treat
+"sent" as terminal, which is honest for what's actually implemented,
+but a live provider's async delivered/bounced callbacks remain a real,
+named gap.
 
 ### Two real bugs found via actual testing, fixed before shipping
 
@@ -606,7 +622,9 @@ pass there too.
 
 ### Known limitations, stated plainly
 
-- `ResendAdapter` unverified against a live account (see above).
+- `ResendAdapter` was unverified against a live account when this
+  section was first written - now live-verified (see the update above,
+  added in a later session).
 - No webhook/callback handling for real provider delivery, bounce, or
   failure events - the local sink's "sent is terminal" model doesn't
   need this, but a real deployment with Resend configured would need
@@ -773,9 +791,15 @@ rendered anywhere yet).
 
 ### Next milestone
 
-The email side (`ResendAdapter`) and the phone side (Twilio webhooks)
-are both code-complete and hardened; both have exactly one real gap
-left, and it's the same shape for both - live verification against a
-real account. For phone specifically, live verification additionally
-needs a public deployment, which is a materially different (and
-bigger) next step than adding a key.
+**Email is now fully closed.** The user obtained a real Resend key,
+sent a real message through the running app and a genuinely separate
+worker process, and confirmed it arrived in their actual inbox - see
+the live-verification update above. That was the one real gap left on
+the email side.
+
+**Phone remains open**, and has a harder ceiling than email did: live
+verification needs both a real Twilio account AND a public deployment
+for Twilio's servers to reach, which is a materially bigger step than
+adding a key. Reasonable next steps from here: pursue that public
+deployment to close the phone gap too, or move to a different part of
+the brief (Milestone 4+, or hardening/polish on what's already built).
