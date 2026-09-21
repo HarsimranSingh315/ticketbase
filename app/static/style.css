@@ -411,6 +411,33 @@ textarea:focus-visible, select:focus-visible {
     line-height: 1.4;
 }
 
+/* ---------- Reports ---------- */
+
+.report-bars { display: flex; flex-direction: column; gap: 10px; }
+.report-bar-row {
+    display: grid;
+    grid-template-columns: 110px 1fr 32px;
+    align-items: center;
+    gap: 10px;
+}
+.report-bar-label { font-size: 13px; color: var(--ink-muted); text-align: right; }
+.report-bar-track {
+    height: 10px;
+    background: var(--rule);
+    border-radius: 5px;
+    overflow: hidden;
+}
+.report-bar-fill { height: 100%; background: var(--pine); border-radius: 5px; }
+.report-bar-fill.report-bar-high { background: var(--brick); }
+.report-bar-fill.report-bar-medium { background: var(--ochre); }
+.report-bar-fill.report-bar-low { background: var(--rule-strong); }
+.report-bar-value { font-family: var(--font-mono); font-size: 12px; color: var(--ink-faint); text-align: right; }
+
+@media (max-width: 560px) {
+    .report-bar-row { grid-template-columns: 80px 1fr 28px; }
+    .report-bar-label { font-size: 11px; }
+}
+
 .message-card {
     padding: 14px 0;
     border-bottom: 1px solid var(--rule);

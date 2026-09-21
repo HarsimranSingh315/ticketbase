@@ -20,6 +20,7 @@
             {% if user %}
             <div class="user-bar">
                 <span class="user-name">{{ user.name }} <span class="user-role">({{ user.role.value }})</span></span>
+                <a href="/reports" class="user-link">Reports</a>
                 <a href="/kb" class="user-link">Knowledge base</a>
                 <a href="/calls" class="user-link">Calls</a>
                 {% if user.role.value == 'admin' %}<a href="/invite" class="user-link">Invite agent</a>{% endif %}

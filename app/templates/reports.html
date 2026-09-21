@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Reports — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/" class="back-link">← All tickets</a>
+
+<section class="stats-bar">
+    <div class="stat-block">
+        <span class="stat-number">{{ total }}</span>
+        <span class="stat-label">Total tickets</span>
+    </div>
+    <div class="stat-block" style="grid-column: span 2;">
+        <span class="stat-number" style="font-size: 22px;">{{ average_resolution_display }}</span>
+        <span class="stat-label">Average time to resolution</span>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>By status</h2>
+    <div class="report-bars">
+        {% for bar in status_bars %}
+        <div class="report-bar-row">
+            <span class="report-bar-label">{{ bar.label|replace('_', ' ')|capitalize }}</span>
+            <div class="report-bar-track"><div class="report-bar-fill" style="width: {{ bar.pct }}%;"></div></div>
+            <span class="report-bar-value">{{ bar.count }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <h2>By priority</h2>
+    <div class="report-bars">
+        {% for bar in priority_bars %}
+        <div class="report-bar-row">
+            <span class="report-bar-label">{{ bar.label|capitalize }}</span>
+            <div class="report-bar-track"><div class="report-bar-fill report-bar-{{ bar.label }}" style="width: {{ bar.pct }}%;"></div></div>
+            <span class="report-bar-value">{{ bar.count }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <h2>By category</h2>
+    {% if category_bars %}
+    <div class="report-bars">
+        {% for bar in category_bars %}
+        <div class="report-bar-row">
+            <span class="report-bar-label">{{ bar.label }}</span>
+            <div class="report-bar-track"><div class="report-bar-fill" style="width: {{ bar.pct }}%;"></div></div>
+            <span class="report-bar-value">{{ bar.count }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty-state">No tickets yet.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Agent workload</h2>
+    {% if agent_workload %}
+    <table class="ledger">
+        <tbody>
+            {% for row in agent_workload %}
+            <tr>
+                <td class="ledger-desc">{{ row.agent.name }}</td>
+                <td class="ledger-meta">{{ row.open }} open</td>
+                <td class="ledger-meta">{{ row.in_progress }} in progress</td>
+                <td class="ledger-meta"><b>{{ row.active_total }}</b> active</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No agents to report on yet.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

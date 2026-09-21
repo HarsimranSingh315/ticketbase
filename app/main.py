@@ -753,6 +753,47 @@ def ui_approve_message(
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
+@app.get("/reports")
+def ui_reports(request: Request, db: Session = Depends(get_db), user: User = Depends(require_agent)):
+    """Real queries over data already being tracked - ticket counts by
+    status/priority/category, average resolution time (from the audit
+    trail), and agent workload. Read-only, so any logged-in role
+    (including reviewer) can view it."""
+    data = crud.get_reports_data(db)
+
+    def _as_bars(counts: dict) -> list[dict]:
+        """Turns {"open": 12, "resolved": 4} into a list with a
+        pre-computed bar-fill percentage, so the template only ever
+        renders a number - no math in Jinja."""
+        top = max(counts.values()) if counts else 0
+        return [
+            {"label": label, "count": count, "pct": round(100 * count / top) if top else 0}
+            for label, count in counts.items()
+        ]
+
+    def _format_resolution_time(hours: Optional[float]) -> str:
+        if hours is None:
+            return "No resolved tickets yet"
+        if hours < 1:
+            return f"{round(hours * 60)} minutes"
+        if hours < 48:
+            return f"{hours:.1f} hours"
+        return f"{hours / 24:.1f} days"
+
+    return templates.TemplateResponse(
+        request, "reports.html",
+        {
+            "user": user,
+            "total": data["total"],
+            "average_resolution_display": _format_resolution_time(data["average_resolution_hours"]),
+            "agent_workload": data["agent_workload"],
+            "status_bars": _as_bars(data["by_status"]),
+            "priority_bars": _as_bars(data["by_priority"]),
+            "category_bars": _as_bars(data["by_category"]),
+        },
+    )
+
+
 @app.get("/calls")
 def ui_calls_list(request: Request, db: Session = Depends(get_db), user: User = Depends(require_agent)):
     """The call log: every call Twilio has told us about, most recent

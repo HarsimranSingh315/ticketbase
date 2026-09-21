@@ -855,3 +855,95 @@ def delete_kb_article(db: Session, article_id: int) -> bool:
     db.delete(article)
     db.commit()
     return True
+
+
+# --- Reporting / analytics ---
+
+def get_average_resolution_hours(db: Session) -> Optional[float]:
+    """
+    Average time from a ticket's creation to the FIRST time it became
+    resolved, in hours. Computed from the audit trail (an actual
+    recorded event), not a "resolved_at" column - this project doesn't
+    have one, and the audit trail is already the authoritative record
+    of when a status change actually happened. Only counts the first
+    resolution per ticket (ordered by event time) so a
+    reopened-then-re-resolved ticket doesn't get double-counted or
+    measured from its second resolution instead of context that matters
+    more (how long the FIRST resolution took).
+    """
+    import json
+
+    events = (
+        db.query(AuditEvent, models.Ticket.created_at.label("ticket_created_at"))
+        .join(models.Ticket, AuditEvent.resource_id == models.Ticket.id)
+        .filter(AuditEvent.resource_type == "ticket", AuditEvent.action == "ticket.status_changed")
+        .order_by(AuditEvent.created_at.asc())
+        .all()
+    )
+
+    resolution_hours = []
+    seen_ticket_ids = set()
+    for event, ticket_created_at in events:
+        if event.resource_id in seen_ticket_ids:
+            continue
+        if not event.details:
+            continue
+        try:
+            details = json.loads(event.details)
+        except (ValueError, TypeError):
+            continue
+        if details.get("to") != "resolved":
+            continue
+        seen_ticket_ids.add(event.resource_id)
+        delta_hours = (event.created_at - ticket_created_at).total_seconds() / 3600
+        if delta_hours >= 0:  # defensive - a negative delta would mean corrupted data, not a real measurement
+            resolution_hours.append(delta_hours)
+
+    if not resolution_hours:
+        return None
+    return sum(resolution_hours) / len(resolution_hours)
+
+
+def get_agent_workload(db: Session) -> list[dict]:
+    """Active (open + in_progress) ticket count per agent, most-loaded
+    first - the "who's overloaded right now" view."""
+    agents = list_agents(db)
+    result = []
+    for agent in agents:
+        open_count = db.query(models.Ticket).filter(
+            models.Ticket.assignee_id == agent.id, models.Ticket.status == models.TicketStatus.open
+        ).count()
+        in_progress_count = db.query(models.Ticket).filter(
+            models.Ticket.assignee_id == agent.id, models.Ticket.status == models.TicketStatus.in_progress
+        ).count()
+        result.append({
+            "agent": agent, "open": open_count, "in_progress": in_progress_count,
+            "active_total": open_count + in_progress_count,
+        })
+    result.sort(key=lambda r: -r["active_total"])
+    return result
+
+
+def get_reports_data(db: Session) -> dict:
+    """
+    Everything the /reports page needs, in one call - avoids the page
+    re-querying the same ticket table five separate times. Real
+    queries over data already being tracked (status, priority,
+    category, the audit trail, assignment) - no new tables, no
+    estimates.
+    """
+    from collections import Counter
+
+    tickets = db.query(models.Ticket).all()
+    by_status = Counter(t.status.value for t in tickets)
+    by_priority = Counter(t.priority.value for t in tickets)
+    by_category = Counter((t.category or "Uncategorized") for t in tickets)
+
+    return {
+        "total": len(tickets),
+        "by_status": dict(by_status),
+        "by_priority": dict(by_priority),
+        "by_category": dict(sorted(by_category.items(), key=lambda kv: -kv[1])),
+        "average_resolution_hours": get_average_resolution_hours(db),
+        "agent_workload": get_agent_workload(db),
+    }
