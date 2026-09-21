@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Calls — TicketBase{% endblock %}
+
+{% block content %}
+
+<a href="/" class="back-link">← All tickets</a>
+
+<section class="panel">
+    <h2>Call log</h2>
+    {% if calls %}
+        <table class="ledger">
+            <tbody>
+                {% for call in calls %}
+                <tr>
+                    <td class="ledger-id">{{ call.direction.value|capitalize }}</td>
+                    <td class="ledger-desc">
+                        {% if call.contact_id and call.contact_id in contacts_by_id %}
+                            {{ contacts_by_id[call.contact_id].name }}
+                            <span class="sim">({{ call.from_number if call.direction.value == 'inbound' else call.to_number }})</span>
+                        {% else %}
+                            <span style="color: var(--ink-faint);">Unknown caller</span>
+                            <span class="sim">({{ call.from_number if call.direction.value == 'inbound' else call.to_number }})</span>
+                        {% endif %}
+                    </td>
+                    <td class="ledger-meta"><span class="tag tag-status-{{ 'resolved' if call.status.value == 'completed' else 'open' }}">{{ call.status.value }}</span></td>
+                    <td class="ledger-meta">{{ call.created_at.strftime('%b %-d, %H:%M') }} UTC</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="empty-state">No calls logged yet. Calls appear here automatically once Twilio is configured to send webhooks to this app.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

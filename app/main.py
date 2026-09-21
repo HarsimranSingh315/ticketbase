@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form, Query
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -41,6 +41,7 @@ from app.auth import (
 from app.models import User, UserRole
 from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index
+from app.telephony import validate_twilio_signature
 
 settings = get_settings()
 
@@ -260,6 +261,89 @@ def health_check(db: Session = Depends(get_db)):
         logger.exception("Health check DB connectivity failure")
         db_ok = False
     return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "unreachable"}
+
+
+# --- Telephony (Milestone 3): Twilio webhooks ---
+#
+# A THIRD auth mechanism, alongside the JSON API's shared key and the
+# browser UI's sessions - these routes are called directly by Twilio's
+# servers, not a browser or an API client, so neither a session cookie
+# nor an API key applies. Twilio's request signature (validated via
+# app/telephony.py) is the entire security boundary here: every route
+# below validates it FIRST, before touching any request data, and
+# rejects with 403 on any failure - missing signature, wrong signature,
+# or TWILIO_AUTH_TOKEN not configured at all (fails closed, not open).
+
+async def _validate_twilio_request(request: Request, settings: Settings) -> dict:
+    """
+    Shared validation for every Twilio webhook route: reads the posted
+    form data, validates the signature against it, and returns the
+    form as a plain dict if valid. Raises HTTPException(403) otherwise -
+    callers don't need their own try/except, just await this first.
+    """
+    form = await request.form()
+    params = dict(form)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = str(request.url)
+    if not validate_twilio_signature(url, params, signature, settings.twilio_auth_token):
+        logger.warning("Rejected Twilio webhook with invalid signature at %s", request.url.path)
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    return params
+
+
+@app.post("/webhooks/twilio/voice")
+async def twilio_voice_webhook(request: Request, db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
+    """
+    Twilio calls this when a call comes in to our number. Logs the call
+    (idempotently, keyed by CallSid), attempts caller-ID lookup, and
+    responds with TwiML telling Twilio what to say/do. This app has no
+    agent phone numbers to <Dial> to, so the response is deliberately
+    simple: acknowledge the call and let the agent follow up via the
+    ticket/customer record the call gets logged against.
+    """
+    params = await _validate_twilio_request(request, settings)
+
+    crud.upsert_call_from_webhook(
+        db,
+        twilio_call_sid=params.get("CallSid", ""),
+        direction="inbound",
+        from_number=params.get("From", ""),
+        to_number=params.get("To", ""),
+        status=params.get("CallStatus", "ringing"),
+    )
+
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response><Say>Thanks for calling support. "
+        "We've logged your call and an agent will follow up with you shortly.</Say></Response>"
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/webhooks/twilio/status")
+async def twilio_status_webhook(request: Request, db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
+    """
+    Twilio calls this on every status change for a call (ringing ->
+    in-progress -> completed, etc.), and again with the final outcome
+    including duration and any recording URL. Twilio guarantees at-
+    least-once delivery - crud.upsert_call_from_webhook is what makes
+    receiving the same callback twice safe (updates the same row by
+    CallSid, never creates a duplicate).
+    """
+    params = await _validate_twilio_request(request, settings)
+
+    duration = params.get("CallDuration")
+    crud.upsert_call_from_webhook(
+        db,
+        twilio_call_sid=params.get("CallSid", ""),
+        direction=params.get("Direction", "inbound"),
+        from_number=params.get("From", ""),
+        to_number=params.get("To", ""),
+        status=params.get("CallStatus", "ringing"),
+        duration_seconds=int(duration) if duration and duration.isdigit() else None,
+        recording_url=params.get("RecordingUrl"),
+    )
+    return Response(content="", status_code=200)
 
 
 # --- Agent auth (Milestone 1): login, logout, invites ---
@@ -669,6 +753,23 @@ def ui_approve_message(
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
+@app.get("/calls")
+def ui_calls_list(request: Request, db: Session = Depends(get_db), user: User = Depends(require_agent)):
+    """The call log: every call Twilio has told us about, most recent
+    first. Matched calls link to their contact; unmatched ones show the
+    raw number for an agent to manually reconcile."""
+    calls = crud.list_recent_calls(db)
+    contacts_by_id = {}
+    for call in calls:
+        if call.contact_id and call.contact_id not in contacts_by_id:
+            contact = crud.get_contact(db, call.contact_id)
+            if contact:
+                contacts_by_id[call.contact_id] = contact
+    return templates.TemplateResponse(
+        request, "calls.html", {"calls": calls, "contacts_by_id": contacts_by_id, "user": user},
+    )
+
+
 # --- Customers (Milestone 1: exact customer history, separate from
 # semantic related tickets - see crud.get_customer_tickets's docstring) ---
 
@@ -694,10 +795,11 @@ def ui_customer_detail(request: Request, customer_id: int, db: Session = Depends
         raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
     contacts = crud.list_contacts_for_customer(db, customer_id)
     tickets = crud.get_customer_tickets(db, customer_id)
+    calls = crud.list_calls_for_customer(db, customer_id)
     return templates.TemplateResponse(
         request, "customer_detail.html",
         {
-            "customer": customer, "contacts": contacts, "tickets": tickets,
+            "customer": customer, "contacts": contacts, "tickets": tickets, "calls": calls,
             "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )

@@ -361,3 +361,60 @@ class KnowledgeArticle(Base):
 
     def set_embedding(self, vector: list[float]) -> None:
         self.embedding = json.dumps(vector)
+
+
+class CallDirection(str, enum.Enum):
+    inbound = "inbound"
+    outbound = "outbound"
+
+
+class CallStatus(str, enum.Enum):
+    """Mirrors Twilio's own CallStatus values (https://www.twilio.com/docs/voice/api/call-resource) -
+    deliberately using Twilio's own vocabulary rather than inventing a
+    parallel one, so a status callback's CallStatus param maps directly
+    onto this enum with no translation layer to keep in sync."""
+    ringing = "ringing"
+    in_progress = "in-progress"
+    completed = "completed"
+    failed = "failed"
+    busy = "busy"
+    no_answer = "no-answer"
+    canceled = "canceled"
+
+
+class Call(Base):
+    """
+    A phone call, inbound or outbound, tracked via Twilio's webhooks.
+    `twilio_call_sid` is Twilio's own unique ID for the call and is the
+    natural idempotency key here - Twilio retries webhooks and sends
+    multiple status callbacks per call (ringing, then in-progress, then
+    completed), and every one of them refers to the same CallSid. This
+    column being UNIQUE is what lets crud.upsert_call_from_webhook treat
+    "have we seen this CallSid before" as a single indexed lookup rather
+    than something the application has to get right through logic alone.
+
+    `contact_id` is populated by caller-ID lookup (see
+    crud.find_contacts_by_phone) ONLY when the calling number matches
+    exactly one contact - same principle as that function's own
+    docstring: a phone number is a lookup hint, not identity
+    verification, so an ambiguous or absent match leaves this NULL for
+    an agent to resolve rather than guessing.
+    """
+    __tablename__ = "calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    twilio_call_sid = Column(String, unique=True, nullable=False, index=True)
+    direction = Column(SAEnum(CallDirection), nullable=False)
+    from_number = Column(String, nullable=False)
+    to_number = Column(String, nullable=False)
+    status = Column(SAEnum(CallStatus), nullable=False, default=CallStatus.ringing)
+
+    contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=True, index=True)
+
+    duration_seconds = Column(Integer, nullable=True)
+    recording_url = Column(String, nullable=True)
+
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)

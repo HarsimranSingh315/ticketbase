@@ -65,4 +65,27 @@
     {% endif %}
 </section>
 
+<section class="panel">
+    <h2>Call history</h2>
+    {% if calls %}
+        <ul class="related-list">
+            {% for call in calls %}
+            <li>
+                <span>
+                    {{ call.direction.value|capitalize }} call
+                    {% if call.direction.value == 'inbound' %}from {{ call.from_number }}{% else %}to {{ call.to_number }}{% endif %}
+                </span>
+                <span class="related-meta">
+                    <span class="tag tag-status-{{ 'resolved' if call.status.value == 'completed' else 'open' }}">{{ call.status.value }}</span>
+                    {% if call.duration_seconds %}<span class="sim">{{ call.duration_seconds }}s</span>{% endif %}
+                    <span class="sim">{{ call.created_at.strftime('%b %-d, %H:%M') }} UTC</span>
+                </span>
+            </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p class="empty-state">No calls logged for this customer yet.</p>
+    {% endif %}
+</section>
+
 {% endblock %}

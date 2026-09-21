@@ -17,3 +17,4 @@ slowapi>=0.1.9
 alembic>=1.13
 python-dotenv>=1.0
 argon2-cffi>=23.1
+twilio>=9.0

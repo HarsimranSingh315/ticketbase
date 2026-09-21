@@ -683,3 +683,107 @@ def fail_job(db: Session, job_id: int, error: str, backoff_seconds: int) -> None
         job.next_attempt_at = _utcnow() + timedelta(seconds=backoff_seconds)
 
     db.commit()
+
+
+# --- Milestone 3: telephony (calls) ---
+
+from app.models import Call, CallDirection, CallStatus
+
+
+def upsert_call_from_webhook(
+    db: Session,
+    twilio_call_sid: str,
+    direction: str,
+    from_number: str,
+    to_number: str,
+    status: str,
+    duration_seconds: Optional[int] = None,
+    recording_url: Optional[str] = None,
+) -> Call:
+    """
+    The core idempotency operation for telephony: Twilio sends multiple
+    webhooks per call (initial ringing, then status changes, then a
+    final callback with duration/recording) - all carrying the SAME
+    CallSid. This looks up by that SID first and updates the existing
+    row if found, rather than ever creating a second row for a call
+    already being tracked. Only sets `started_at`/`ended_at` at the
+    natural transition points (first time we see in-progress; first
+    time we see a terminal status) rather than overwriting them on
+    every callback.
+    """
+    call = db.query(Call).filter(Call.twilio_call_sid == twilio_call_sid).first()
+    terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
+
+    if call is None:
+        call = Call(
+            twilio_call_sid=twilio_call_sid,
+            direction=direction,
+            from_number=from_number,
+            to_number=to_number,
+            status=status,
+        )
+        if status == "in-progress":
+            call.started_at = _utcnow()
+        db.add(call)
+    else:
+        if call.status.value != "in-progress" and status == "in-progress":
+            call.started_at = _utcnow()
+        call.status = status
+
+    if status in terminal_statuses and call.ended_at is None:
+        call.ended_at = _utcnow()
+    if duration_seconds is not None:
+        call.duration_seconds = duration_seconds
+    if recording_url is not None:
+        call.recording_url = recording_url
+
+    # Caller-ID lookup, only on first sight of the call and only when
+    # unambiguous - see find_contacts_by_phone's own docstring for why
+    # a multi-match or zero-match result leaves this unlinked rather
+    # than guessing.
+    if call.contact_id is None:
+        matches = find_contacts_by_phone(db, from_number if direction == "inbound" else to_number)
+        if len(matches) == 1:
+            call.contact_id = matches[0].id
+
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def get_call_by_sid(db: Session, twilio_call_sid: str) -> Optional[Call]:
+    return db.query(Call).filter(Call.twilio_call_sid == twilio_call_sid).first()
+
+
+def list_calls_for_contact(db: Session, contact_id: int) -> list[Call]:
+    return db.query(Call).filter(Call.contact_id == contact_id).order_by(Call.created_at.desc()).all()
+
+
+def list_calls_for_customer(db: Session, customer_id: int) -> list[Call]:
+    """All calls across every contact belonging to this customer -
+    the phone equivalent of get_customer_tickets's exact history."""
+    contact_ids = [c.id for c in list_contacts_for_customer(db, customer_id)]
+    if not contact_ids:
+        return []
+    return (
+        db.query(Call)
+        .filter(Call.contact_id.in_(contact_ids))
+        .order_by(Call.created_at.desc())
+        .all()
+    )
+
+
+def list_recent_calls(db: Session, limit: int = 50) -> list[Call]:
+    """The call log: every call, most recent first, matched or not -
+    lets an agent find and manually reconcile an unmatched caller."""
+    return db.query(Call).order_by(Call.created_at.desc()).limit(limit).all()
+
+
+def link_call_to_ticket(db: Session, call_id: int, ticket_id: int) -> Optional[Call]:
+    call = db.query(Call).filter(Call.id == call_id).first()
+    if call is None:
+        return None
+    call.ticket_id = ticket_id
+    db.commit()
+    db.refresh(call)
+    return call

@@ -627,3 +627,155 @@ pass there too.
 Per the brief's ordering: Milestone 3 (a real customer-facing phone
 integration) or closing the Resend/webhook gap named above with a real
 provider account, whichever matters more for the actual next use case.
+
+---
+
+## Milestone 3: telephony (Twilio webhooks, caller-ID lookup)
+
+### What was built
+
+- `Call` model: `twilio_call_sid` is the natural idempotency key
+  (UNIQUE) - Twilio sends multiple webhooks per call (initial ringing,
+  then status changes, then a final callback with duration/recording),
+  all carrying the same CallSid, and guarantees at-least-once delivery
+  (retries happen). `crud.upsert_call_from_webhook` is the one function
+  responsible for turning that into "one row per call, updated in
+  place" rather than growing a new row per callback.
+- `/webhooks/twilio/voice` (inbound call) and `/webhooks/twilio/status`
+  (status/outcome callbacks) - both idempotent by CallSid, both attempt
+  caller-ID lookup via the phone-normalization work already built in
+  Milestone 1 (`crud.find_contacts_by_phone`), and both link a call to
+  a contact ONLY on an unambiguous single match - a shared office line
+  matching two different contacts, or no match at all, leaves the call
+  unlinked for an agent to resolve rather than guessing.
+- A **third distinct auth mechanism**, alongside the JSON API's shared
+  key and the browser UI's sessions: these routes are called directly
+  by Twilio's servers, so neither applies. Twilio's request signature
+  is the entire security boundary - every route validates it FIRST,
+  before touching any request data, and fails closed (rejects) on a
+  missing/wrong signature or an unconfigured `TWILIO_AUTH_TOKEN`.
+- UI: a call log (`/calls`) showing every call, matched or not, and a
+  "Call history" section on each customer's detail page (the phone
+  equivalent of `get_customer_tickets`'s exact ticket history).
+
+### A real verification story worth keeping: don't trust a memorized value
+
+Before writing any tests, I wrote a manual HMAC-SHA1 implementation of
+Twilio's signature algorithm and tried to check it against a specific
+test vector I recalled from training data. The two didn't match. Rather
+than assume my code was wrong and start "fixing" a working
+implementation, I installed the official `twilio` SDK and compared its
+own `compute_signature()` output against mine, on the same inputs: they
+were byte-for-byte identical. The memorized "expected" value was simply
+wrong - not the algorithm.
+
+Having confirmed my implementation was correct, I switched to the
+official SDK anyway, for a reason unrelated to correctness: Twilio's own
+webhook-security docs explicitly warn that hand-rolled validation has
+real, documented failure modes their library tracks and a
+point-in-time reimplementation wouldn't - empty-value form parameters
+being silently dropped by some parsers (but included in Twilio's
+signature), and "evolving parameter sets" Twilio adds without notice.
+This is the same reasoning already applied to password hashing
+(`argon2-cffi` over hand-rolled hashing in `app/security.py`): trust a
+maintained library for a vendor-specific, evolving security contract,
+even when a first-principles implementation is verified correct today.
+
+Every "valid signature" test in `tests/test_telephony.py` computes a
+**genuine** signature via the same `RequestValidator` the app uses, on
+real (if synthetic) call data - this is real positive-path coverage of
+the security boundary, not a mocked bypass. Also tested: a tampered
+payload under an otherwise-valid signature (must fail - proves the
+check binds to the actual params, not just the header's presence), and
+the fails-closed behavior when no auth token is configured at all.
+
+### The Postgres enum-type migration bug, caught proactively this time
+
+Milestone 2's migration broke on Postgres specifically because
+`DROP TABLE` doesn't remove the separate named ENUM TYPE that
+`sa.Enum(...)` creates alongside it (see that section above for the
+full story). Rather than rediscover this the same way, the fix was
+applied to this migration's `downgrade()` before ever testing it - and
+then the full upgrade → downgrade → upgrade round trip was verified on
+both SQLite and real Postgres anyway, to confirm the proactive fix
+actually worked rather than assuming it did.
+
+### A subtle enum encoding question, checked rather than assumed
+
+`CallStatus.in_progress = "in-progress"` and `CallStatus.no_answer =
+"no-answer"` are the first enums in this project where the Python
+member NAME (which can't contain a hyphen) differs from its VALUE
+(which matches Twilio's own hyphenated vocabulary, e.g. `CallStatus`
+in Twilio's API). Every earlier enum in this codebase had name==value,
+so this was untested territory: does SQLAlchemy store the member name
+or the value in the database, and does that match what a real Postgres
+native ENUM type (created with the member *names* as its labels)
+actually accepts? Checked directly rather than assumed - inspected the
+raw database column value (not just Python's read-back) on both
+SQLite and real Postgres, including the double-hyphen `no-answer`
+case specifically. Confirmed correct on both: SQLAlchemy resolves the
+Twilio-format value string to the correct member before writing, and
+the stored raw value is the underscored name, matching the Postgres
+type definition.
+
+### Full manual end-to-end verification
+
+Beyond the automated tests: posted genuinely-signed webhook payloads
+end-to-end and confirmed, in order - a valid signature is accepted and
+returns proper TwiML with the correct content type; an invalid
+signature is rejected (403); a missing signature is rejected (403); the
+call is logged with the right fields; a subsequent status callback for
+the same CallSid updates the same row (not a new one) with the right
+duration; and caller-ID lookup correctly matches a differently-
+formatted version of a stored phone number (`+1 (555) 123-4567` on the
+incoming call against `+15551234567` stored on the contact).
+
+### Test suite
+
+```
+$ python -m pytest -q
+111 passed, 3 warnings
+```
+
+14 new tests in `tests/test_telephony.py`; the full suite re-verified
+against real Postgres (`TEST_DATABASE_URL=postgresql://...`) - all 111
+pass there too.
+
+### Known limitations, stated plainly - this one has a harder ceiling than the others
+
+Every other "unverified against a live account" limitation in this
+project (Groq, Resend) was closeable simply by obtaining a free API
+key. This one is not: a genuine end-to-end test (an actual phone call
+reaching this app) requires Twilio's servers to reach a **publicly
+reachable URL**, and this sandbox has none. Getting a real Twilio
+account would let someone configure a phone number's webhook URLs, but
+proving a live call actually works still requires the app to be
+deployed somewhere public first - a materially bigger step than
+"add a key to `.env`," and one that couldn't be completed in this
+environment regardless of account access.
+
+What was and wasn't verified, stated precisely: the signature
+algorithm is verified correct against the official SDK's own output;
+the webhook handlers, idempotency, and caller-ID logic are verified
+against realistic, genuinely-signed synthetic payloads. What remains
+unverified is whether Twilio's real, live webhook requests match the
+synthetic ones used here closely enough in practice - the docs suggest
+they should, but "the docs say so" is a weaker claim than this
+project's own standard elsewhere, and is named as such rather than
+glossed over.
+
+Also not built in this slice: manual call-to-ticket linking UI (the
+data model and `crud.link_call_to_ticket` support it; no route/template
+calls it yet), outbound calling (Twilio's REST API to place a call, as
+opposed to receiving webhooks about one), and voicemail/recording
+playback in the UI (recording URLs are stored when present, not
+rendered anywhere yet).
+
+### Next milestone
+
+The email side (`ResendAdapter`) and the phone side (Twilio webhooks)
+are both code-complete and hardened; both have exactly one real gap
+left, and it's the same shape for both - live verification against a
+real account. For phone specifically, live verification additionally
+needs a public deployment, which is a materially different (and
+bigger) next step than adding a key.

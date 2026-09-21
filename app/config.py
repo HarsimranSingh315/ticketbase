@@ -95,6 +95,17 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = 5
     outbox_poll_interval_seconds: float = 2.0
 
+    # Milestone 3: telephony (Twilio webhooks). Empty twilio_auth_token
+    # means webhook signature validation will reject everything (fails
+    # closed, not open - see app/telephony.py) until a real token is
+    # configured. There is no "local sink" equivalent for phone calls -
+    # unlike email, a call can't be faked locally in a meaningful way,
+    # so this integration is exercised in tests via correctly-signed
+    # simulated webhook payloads instead (see tests/test_telephony.py).
+    twilio_auth_token: str = ""
+    twilio_account_sid: str = ""
+    twilio_phone_number: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
