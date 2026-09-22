@@ -981,3 +981,116 @@ Docker-related claim in this document.
 
 Outbound calling (Twilio's REST API to actually place a call) is the
 last of the three features requested together in this round.
+
+---
+
+## Outbound calling (Twilio REST API) + two critical bugs found and fixed
+
+### What was built
+
+- Two adapters behind one interface, same pattern as `app/mail.py`'s
+  local sink / Resend pair: `LocalSinkCallAdapter` (default, records
+  the attempt as a real `Call` row, places no real call - zero cost, no
+  Twilio account needed) and `TwilioCallAdapter` (real calls via
+  Twilio's REST API, selected only when both `TWILIO_ACCOUNT_SID` and
+  `TWILIO_AUTH_TOKEN` are configured).
+- `CallStatus` gained a `queued` value (an outbound call's starting
+  state, before Twilio even attempts to ring it - inbound calls start
+  at `ringing` instead). This needed its own hand-written migration:
+  Postgres native enums can't gain a value via autogenerate, and
+  `ALTER TYPE ... ADD VALUE` has a real operational requirement
+  (it must run outside the migration's normal transaction, via
+  Alembic's `autocommit_block()`) - confirmed necessary, not just
+  cautious, by testing directly against real Postgres: the native type
+  rejected the raw string `"queued"` outright before this migration
+  existed. Verified the full migration chain, and that a `queued` row
+  round-trips correctly, on real Postgres.
+- A "Call this contact" button on the ticket detail page, shown per
+  contact that has a phone number on file, plus a call-history list
+  scoped to the ticket - visible without needing to leave the ticket
+  page to check the customer's full call history separately.
+- `TwilioCallAdapter` is written and unit-tested with a mocked Twilio
+  client, but **not verified against a live account** - same honesty as
+  `ResendAdapter` before a real key existed for it, plus the same
+  additional harder limitation already documented for the webhook-
+  receiving side: even with a real Twilio account, a real outbound call
+  also needs `PUBLIC_BASE_URL` to be a genuinely Twilio-reachable URL,
+  which this sandboxed environment cannot provide either way.
+
+### Two critical, pre-existing bugs found by running the full suite together - not by the new feature's own tests
+
+Both were already present in the codebase before this round of work
+began, and both were invisible to any test file run in isolation -
+only running the ENTIRE suite together surfaced them, which is exactly
+why that full run is never skipped, even when a new feature's own
+tests all pass on their own:
+
+1. **`_render_conflict` (used by every ticket-write route on a version
+   conflict) had been deleted from `app/main.py` entirely** - called in
+   8 places, defined nowhere. Any version-conflict during a status
+   change, category confirmation, assignment, customer link, or message
+   edit/approval crashed with a `NameError` instead of showing the
+   intended clear "this changed since you loaded the page" message.
+   Restored it.
+2. **`_ticket_detail_context`'s return dictionary was silently missing
+   `audit_events`, `audit_actors`, and `contacts`** - all three were
+   computed but never returned. This meant the entire Activity/audit-
+   trail section had been invisible on every ticket detail page, for
+   anyone, the whole time this state existed - a real, user-facing
+   regression, not a subtle edge case. Restored all three.
+
+Neither bug was caused by this session's own work - they were
+inherited, sitting undetected until the full suite was actually run as
+one, rather than trusting each feature's own passing tests in
+isolation.
+
+### Full manual end-to-end verification
+
+Placed a call with no `TWILIO_PHONE_NUMBER` configured and confirmed
+the clear, specific error shown (not a generic failure). Configured it
+and placed a call again: confirmed the "Call Jane Doe (+1...)" button
+appeared correctly, the call succeeded via the local sink adapter, a
+real `Call` row was created with the correct direction/contact/ticket
+linkage, and the call genuinely appeared in the ticket's call-history
+section with the right status - all through the real running routes,
+not shortcuts. (An earlier attempt at this same check produced a
+misleading result from a bug in the test SCRIPT itself - stale
+placeholder code left over from drafting it, not from the app - caught
+and corrected by rewriting the check cleanly in one script before
+trusting the result either way.)
+
+### Test suite
+
+```
+$ python -m pytest -q
+159 passed, 2 warnings
+```
+
+14 new tests in `tests/test_outbound_calling.py` (adapter selection
+logic, the local sink path end-to-end, `TwilioCallAdapter` success and
+failure paths via a mocked client, the no-phone-number and no-phone-
+on-contact error paths, reviewer permission denial, and the call-
+history UI). Full suite re-verified against real Postgres - all 159
+pass there too, including the hand-written `queued` enum migration.
+
+### Known limitations, stated plainly
+
+- `TwilioCallAdapter` unverified against a live account, and even with
+  one, a real call additionally needs a public deployment (`PUBLIC_BASE_URL`)
+  that this sandbox cannot provide - the same, harder-than-email
+  ceiling already documented for the Twilio webhook-receiving side.
+- No UI to browse or re-link an ORPHANED call (one Twilio's webhook
+  told us about but caller-ID couldn't match to a contact) to a ticket
+  after the fact - `crud.link_call_to_ticket` exists and is usable, but
+  nothing in the UI calls it yet.
+- Outbound call status only updates via the same `/webhooks/twilio/status`
+  callback inbound calls use - correct in principle (Twilio treats both
+  directions identically post-connection), but genuinely unverified
+  live for the same public-URL reason as everything else Twilio-related.
+
+### All three requested features are now complete
+
+Reporting/analytics, SLA timers & escalation, and outbound calling -
+the three features requested together this round - are all built,
+tested (159 tests total, all passing on both SQLite and real Postgres),
+and documented, with every limitation stated rather than implied.

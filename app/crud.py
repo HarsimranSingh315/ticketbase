@@ -759,6 +759,17 @@ def list_calls_for_contact(db: Session, contact_id: int) -> list[Call]:
     return db.query(Call).filter(Call.contact_id == contact_id).order_by(Call.created_at.desc()).all()
 
 
+def list_calls_for_ticket(db: Session, ticket_id: int) -> list[Call]:
+    """Calls explicitly linked to this ticket - an outbound call placed
+    from the ticket page (see ui_place_outbound_call) sets this at
+    creation time. An inbound call is only linked here if an agent
+    connects it manually (crud.link_call_to_ticket) - caller-ID lookup
+    alone links a call to a CONTACT, not a specific ticket, since one
+    contact can have many tickets and a call isn't inherently about any
+    particular one of them."""
+    return db.query(Call).filter(Call.ticket_id == ticket_id).order_by(Call.created_at.desc()).all()
+
+
 def list_calls_for_customer(db: Session, customer_id: int) -> list[Call]:
     """All calls across every contact belonging to this customer -
     the phone equivalent of get_customer_tickets's exact history."""
@@ -1019,3 +1030,23 @@ def record_new_sla_breaches(db: Session, sla_hours: dict) -> int:
     if newly_recorded:
         db.commit()
     return newly_recorded
+
+
+def create_outbound_call(
+    db: Session, call_sid: str, to_number: str, from_number: str,
+    contact_id: Optional[int] = None, ticket_id: Optional[int] = None,
+) -> Call:
+    """Records a call the app itself placed (as opposed to
+    upsert_call_from_webhook, which records calls Twilio tells us
+    about). Starts at `queued` - the real status arrives via the
+    normal /webhooks/twilio/status callback as the call progresses,
+    same as any other call once it exists."""
+    call = Call(
+        twilio_call_sid=call_sid, direction=CallDirection.outbound,
+        from_number=from_number, to_number=to_number, status=CallStatus.queued,
+        contact_id=contact_id, ticket_id=ticket_id,
+    )
+    db.add(call)
+    db.commit()
+    db.refresh(call)
+    return call

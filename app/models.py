@@ -372,7 +372,19 @@ class CallStatus(str, enum.Enum):
     """Mirrors Twilio's own CallStatus values (https://www.twilio.com/docs/voice/api/call-resource) -
     deliberately using Twilio's own vocabulary rather than inventing a
     parallel one, so a status callback's CallStatus param maps directly
-    onto this enum with no translation layer to keep in sync."""
+    onto this enum with no translation layer to keep in sync.
+
+    `queued` was added specifically for outbound calling (this project
+    initially only received inbound calls, which start at `ringing` -
+    an outbound call PLACED via Twilio's REST API starts `queued`
+    before Twilio even attempts to ring it). Confirmed this value was
+    genuinely missing by testing directly against real Postgres before
+    adding it: the native enum type rejected the raw string outright
+    (`invalid input value for enum callstatus: "queued"`) - SQLite, by
+    contrast, silently accepted it with no enforcement at all, which is
+    exactly the kind of divergence this project tests both databases to
+    catch, not just assumes about."""
+    queued = "queued"
     ringing = "ringing"
     in_progress = "in-progress"
     completed = "completed"

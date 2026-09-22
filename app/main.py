@@ -41,7 +41,7 @@ from app.auth import (
 from app.models import User, UserRole
 from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base
-from app.telephony import validate_twilio_signature
+from app.telephony import validate_twilio_signature, get_call_adapter
 
 settings = get_settings()
 
@@ -580,6 +580,7 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
     field (customer, assignee, agents list, audit trail, draft
     messages) individually."""
     customer = crud.get_customer(db, ticket.customer_id) if ticket.customer_id else None
+    contacts = crud.list_contacts_for_customer(db, customer.id) if customer else []
     assignee = crud.get_user(db, ticket.assignee_id) if ticket.assignee_id else None
     agents = crud.list_agents(db)
     audit_events = crud.get_audit_events_for_ticket(db, ticket.id)
@@ -594,14 +595,16 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
     sla_hours = {"high": settings.sla_high_priority_hours, "medium": settings.sla_medium_priority_hours, "low": settings.sla_low_priority_hours}
     sla_deadline = crud.compute_sla_deadline(ticket, sla_hours)
     sla_breached = crud.is_ticket_breached(ticket, sla_hours)
+    calls = crud.list_calls_for_ticket(db, ticket.id)
     return {
         "ticket": ticket, "related_tickets": related_tickets, "user": user,
         "csrf_token": csrf_token_for_template(request, settings),
-        "customer": customer, "assignee": assignee, "agents": agents,
+        "customer": customer, "contacts": contacts, "assignee": assignee, "agents": agents,
         "audit_events": audit_events, "audit_actors": audit_actors,
         "suggestion": suggestion, "conflict_error": conflict_error,
         "messages": messages, "message_jobs": message_jobs,
         "sla_deadline": sla_deadline, "sla_breached": sla_breached,
+        "calls": calls,
     }
 
 
@@ -625,6 +628,30 @@ def ui_suggest_category(
         request, "ticket_detail.html",
         _ticket_detail_context(db, ticket, related, user, request, rag_settings, suggestion=suggestion),
     )
+
+
+def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User, settings: Settings):
+    """
+    Shared handling for a VersionConflict on any ticket write: re-render
+    the ticket page with the ticket's REAL current data (so the form the
+    agent sees is no longer stale) and a clear explanation of what
+    happened, rather than a generic error page or - worse - retrying
+    the write blind.
+
+    RESTORED after being found accidentally deleted entirely: caught by
+    running the full test suite together (not just the new tests in
+    isolation) before committing, which is exactly why that step is
+    never skipped in this project even when the new feature's own
+    tests all pass on their own.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    context = _ticket_detail_context(
+        db, ticket, related, user, request, settings,
+        conflict_error="This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
+    )
+    return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=409)
 
 
 @app.post("/ui/tickets/{ticket_id}/status", dependencies=[Depends(require_csrf)])
@@ -696,7 +723,57 @@ def ui_link_customer(
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
-def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User, settings: Settings):
+@app.post("/ui/tickets/{ticket_id}/call", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_place_outbound_call(
+    request: Request, ticket_id: int, contact_id: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    """
+    Places an outbound call to a contact and records it - the
+    REST-API-calling counterpart to the webhook-receiving side already
+    built. Uses LocalSinkCallAdapter (records the attempt, no real call)
+    unless TWILIO_ACCOUNT_SID/AUTH_TOKEN are both set - see
+    app/telephony.py.
+    """
+    ticket = crud.get_ticket(db, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    contact = crud.get_contact(db, contact_id)
+    if contact is None or not contact.phone:
+        raise HTTPException(status_code=404, detail="Contact not found or has no phone number on file")
+
+    if not settings.twilio_phone_number:
+        return _render_call_error(
+            request, db, ticket, rag_index, user, settings,
+            "TWILIO_PHONE_NUMBER is not configured - set it in .env before placing outbound calls (even simulated local ones).",
+        )
+
+    adapter = get_call_adapter(settings)
+    twiml_url = f"{settings.public_base_url}/webhooks/twilio/voice" if settings.public_base_url else None
+    result = adapter.place_call(to_number=contact.phone, from_number=settings.twilio_phone_number, twiml_url=twiml_url)
+
+    if not result.success:
+        return _render_call_error(request, db, ticket, rag_index, user, settings, result.error or "The call could not be placed.")
+
+    crud.create_outbound_call(
+        db, call_sid=result.call_sid, to_number=contact.phone, from_number=settings.twilio_phone_number,
+        contact_id=contact.id, ticket_id=ticket_id,
+    )
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
+
+def _render_call_error(request: Request, db: Session, ticket, rag_index: RAGIndex, user: User, settings: Settings, error_message: str):
+    """Same principle as _render_conflict: a failed call attempt gets a
+    clear, specific error shown on the real current page, not a raw
+    500 or a silently-swallowed failure."""
+    candidates = crud.list_other_tickets(db, exclude_id=ticket.id)
+    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    context = _ticket_detail_context(
+        db, ticket, related, user, request, settings,
+        conflict_error=f"Couldn't place the call: {error_message}",
+    )
+    return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=502)
     """
     Shared handling for a VersionConflict on any ticket write: re-render
     the ticket page with the ticket's REAL current data (so the form the

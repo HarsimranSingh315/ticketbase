@@ -46,6 +46,42 @@
     {% endif %}
 </section>
 
+{% if customer %}
+<section class="panel">
+    <h2>Calls</h2>
+    {% set callable_contacts = contacts|selectattr('phone')|list %}
+    {% if callable_contacts %}
+        {% if user.role.value != 'reviewer' %}
+        <div class="message-actions" style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+        {% for contact in callable_contacts %}
+            <form method="post" action="/ui/tickets/{{ ticket.id }}/call">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="contact_id" value="{{ contact.id }}">
+                <button type="submit" class="btn btn-quiet">Call {{ contact.name }} ({{ contact.phone }})</button>
+            </form>
+        {% endfor %}
+        </div>
+        {% endif %}
+    {% else %}
+        <p class="no-record">No contact with a phone number on file for this customer.</p>
+    {% endif %}
+
+    {% if calls %}
+    <ul class="related-list" style="margin-top: 14px;">
+        {% for call in calls %}
+        <li>
+            <span>{{ call.direction.value|capitalize }} call to/from {{ call.to_number if call.direction.value == 'outbound' else call.from_number }}</span>
+            <span class="related-meta">
+                <span class="tag tag-status-{{ 'resolved' if call.status.value == 'completed' else 'open' }}">{{ call.status.value }}</span>
+                {% if call.duration_seconds %}<span class="sim">{{ call.duration_seconds }}s</span>{% endif %}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>
+{% endif %}
+
 {% if user.role.value != 'reviewer' %}
 <section class="panel">
     <h2>Assignment</h2>

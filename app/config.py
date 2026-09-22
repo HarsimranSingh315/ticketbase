@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_phone_number: str = ""
 
+    # Required for OUTBOUND calling specifically (not the webhook-
+    # receiving side, which needs no config of its own beyond the auth
+    # token). Twilio's REST API requires a URL it can fetch TwiML
+    # instructions from when the call connects - that URL must be
+    # publicly reachable BY TWILIO, which this project cannot provide
+    # from a local/sandboxed environment. Left blank, outbound calling
+    # fails closed with a clear error rather than attempting an API
+    # call Twilio would reject anyway.
+    public_base_url: str = ""
+
     # SLA timers. Deadline = ticket.created_at + the hours for its
     # priority. Deliberately simple (one clock per priority, not
     # business-hours-aware or pausable) - a real production SLA engine
