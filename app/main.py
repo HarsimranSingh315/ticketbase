@@ -93,7 +93,47 @@ async def lifespan(app: FastAPI):
 
 limiter = Limiter(key_func=get_remote_address)
 
-app = FastAPI(title="TicketBase", version="0.3.0", lifespan=lifespan)
+app = FastAPI(
+    title="TicketBase", version="0.3.0", lifespan=lifespan,
+    # See Settings.enable_api_docs's docstring - off by default so the
+    # full API surface isn't published to the open internet by default.
+    docs_url="/docs" if settings.enable_api_docs else None,
+    redoc_url="/redoc" if settings.enable_api_docs else None,
+    openapi_url="/openapi.json" if settings.enable_api_docs else None,
+)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """
+    Standard defense-in-depth headers on every response - cheap,
+    expected, and previously entirely missing. Content-Security-Policy
+    is scoped to what this app's templates actually load (checked
+    directly, not guessed): Google Fonts (style/font), a single
+    self-hosted script (app.js), and data: URIs for the inline SVG
+    favicon. style-src allows 'unsafe-inline' because the templates use
+    inline style="..." attributes throughout - a real, deliberate
+    tradeoff (refactoring every one into a CSS class to tighten this
+    further was judged not worth the churn/regression risk for a
+    headers pass), not an oversight.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none';"
+    )
+    return response
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

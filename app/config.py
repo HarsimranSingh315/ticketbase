@@ -14,6 +14,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # "development" (default) keeps today's friendly local/test behavior
+    # - an unset SECRET_KEY auto-generates one and logs a warning, and
+    # interactive API docs are available. Set ENVIRONMENT=production for
+    # a real deployment: the app then REFUSES TO START on a missing
+    # SECRET_KEY (see get_settings below) instead of silently limping on
+    # with a key that changes every restart and breaks CSRF/sessions the
+    # moment there's more than one process - a warning is easy to miss
+    # in deploy logs, a startup crash is not.
+    environment: str = "development"
+
     # Database
     database_url: str = "sqlite:///./ticketbase.db"
 
@@ -36,6 +46,13 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    # FastAPI's interactive API docs (/docs, /redoc) are OFF by default -
+    # every route already requires real auth to do anything, so this
+    # isn't a break-in risk either way, but there's no reason to publish
+    # a map of the API's full surface to the open internet. Set
+    # ENABLE_API_DOCS=true for local development if you want them.
+    enable_api_docs: bool = False
 
     # Optional LLM step for SupportRAG's drafted response (see app/llm.py).
     # Empty api_key = disabled (default) - the deterministic template in
@@ -137,6 +154,17 @@ def get_settings() -> Settings:
     """
     settings = Settings()
     if not settings.secret_key:
+        if settings.environment == "production":
+            raise RuntimeError(
+                "SECRET_KEY is not set and ENVIRONMENT=production. Refusing to "
+                "start: an auto-generated key changes every restart and every "
+                "process, which silently breaks CSRF validation and session "
+                "consistency the moment there's more than one worker process - "
+                "a warning in the logs is too easy to miss for something this "
+                "important. Set a real SECRET_KEY in your environment "
+                "(python -c \"import secrets; print(secrets.token_urlsafe(32))\" "
+                "generates one) before deploying."
+            )
         import logging
         import secrets as _secrets
         settings.secret_key = _secrets.token_urlsafe(32)

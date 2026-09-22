@@ -1094,3 +1094,79 @@ Reporting/analytics, SLA timers & escalation, and outbound calling -
 the three features requested together this round - are all built,
 tested (159 tests total, all passing on both SQLite and real Postgres),
 and documented, with every limitation stated rather than implied.
+
+---
+
+## Pre-deployment security hardening
+
+Requested directly, before any real public deployment: a genuine
+check of what's actually in the code, not a blanket reassurance. Found
+three concrete gaps by grepping the actual codebase - not guessed -
+and fixed all three.
+
+### What was already strong (built across earlier sessions)
+
+Argon2id password hashing, CSRF protection (HMAC synchronizer tokens),
+role-based access control, session revocation, an audit trail on every
+sensitive write, optimistic concurrency, SQL injection protection via
+the ORM throughout, a non-root Docker container, Twilio webhook
+signature validation that fails closed, and 159 (now 166) passing
+tests including real concurrency and cross-database migration testing.
+
+### Three real gaps found and fixed
+
+1. **FastAPI's interactive API docs (`/docs`, `/redoc`, `/openapi.json`)
+   were enabled by default** - publicly browsable, showing the entire
+   API surface to anyone. Not a break-in risk (every route still
+   requires real auth to do anything), but unnecessary public surface
+   area. Fixed: `Settings.enable_api_docs` (default `False`) now
+   controls whether FastAPI even registers these routes - confirmed by
+   checking the actual route count before/after (46 → 42) and hitting
+   `/docs` directly (404).
+2. **A missing `SECRET_KEY` only logged a warning and kept running**,
+   auto-generating a temporary key that changes every restart and every
+   process - silently breaking CSRF/session consistency the moment
+   there's more than one worker process, with nothing forcing anyone to
+   notice. Fixed: a new `ENVIRONMENT` setting (default `"development"`,
+   preserving today's friendly local/test behavior unchanged) makes a
+   missing `SECRET_KEY` a hard `RuntimeError` on startup when
+   `ENVIRONMENT=production` - verified directly, three ways: production
+   with no key (raises, with a clear message), production with a real
+   key (starts fine), and plain local dev with no key (still just
+   warns, unaffected).
+3. **No security headers at all** - no `Strict-Transport-Security`,
+   `X-Frame-Options`, `X-Content-Type-Options`, `Content-Security-Policy`,
+   or `Referrer-Policy` on any response. Fixed with a single middleware
+   adding all five to every response. The CSP was scoped to what this
+   app's templates ACTUALLY load - checked directly by grepping every
+   template, not assumed: Google Fonts (style/font), one self-hosted
+   script (`app.js`), and `data:` URIs for the inline SVG favicon.
+   `style-src` allows `'unsafe-inline'` as a deliberate, stated
+   tradeoff - the templates use inline `style="..."` attributes
+   throughout, and refactoring every one into a CSS class to close that
+   last gap was judged not worth the churn/regression risk for a
+   headers pass; everything else in the policy (`script-src 'self'`,
+   `object-src 'none'`, `frame-ancestors 'none'`) is fully locked down.
+
+### Test suite
+
+```
+$ python -m pytest -q
+166 passed, 2 warnings
+```
+
+7 new tests in `tests/test_security_hardening.py`. Full suite
+re-verified against real Postgres - all 166 pass there too.
+
+### Still true, stated plainly: this is hardening, not an audit
+
+Following good practices throughout is not the same claim as "a
+security professional has reviewed this." No penetration testing or
+third-party audit has been done. Also worth knowing before a real
+deployment: the rate limiter (`slowapi`) uses in-memory storage by
+default, meaning limits are per-process, not shared - fine for the
+single-instance deployment this project's size actually needs, but
+would need a shared backend (e.g. Redis) if ever scaled to multiple
+app replicas. `BOOTSTRAP_ADMIN_EMAIL`/`PASSWORD` must still be unset
+after first use in any real deployment, exactly as `.env.example`
+already says.
