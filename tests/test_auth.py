@@ -51,11 +51,77 @@ def test_create_ticket_succeeds_with_correct_api_key(auth_client):
     assert resp.status_code == 201
 
 
-def test_read_endpoints_do_not_require_api_key(auth_client):
-    # GET /tickets and GET /health stay open even with auth enabled -
-    # only write endpoints (POST/PATCH) are gated.
-    assert auth_client.get("/tickets").status_code == 200
+def test_read_endpoints_require_authentication(auth_client):
+    """
+    GET /tickets now requires either a real session or the API key -
+    this was a genuine P0 finding (see docs/current-state.md's
+    production-readiness section): these routes previously returned
+    real ticket data to fully anonymous requests, even with an API key
+    configured, since require_api_key was never applied to them at
+    all. /health stays deliberately public - a health check has to be
+    reachable without credentials, by design, not by oversight.
+    """
+    assert auth_client.get("/tickets").status_code == 401
+    assert auth_client.get("/tickets", headers={"X-API-Key": TEST_API_KEY}).status_code == 200
     assert auth_client.get("/health").status_code == 200
+
+
+def test_the_four_previously_open_routes_all_reject_anonymous_requests_with_no_api_key_configured(client):
+    """
+    The core of the P0 fix, stated as directly as possible: with NO
+    API_KEY configured at all (the plain local/dev/test default - the
+    exact condition under which these routes were previously wide
+    open), all four routes the review flagged now reject a fully
+    anonymous request. Before this fix, every one of these calls
+    returned 200 with real ticket data instead of 401.
+    """
+    # A ticket has to exist for the per-ticket routes to have something
+    # real to (fail to) return - created via the one write route that
+    # was never part of this vulnerability (POST /tickets already had
+    # require_api_key, which correctly no-ops when unset, same as always).
+    ticket_id = client.post("/tickets", json={"description": "test"}).json()["id"]
+
+    assert client.get("/tickets").status_code == 401
+    assert client.get(f"/tickets/{ticket_id}").status_code == 401
+    assert client.get(f"/tickets/{ticket_id}/related").status_code == 401
+    assert client.post(f"/tickets/{ticket_id}/suggest").status_code == 401
+
+
+def test_the_four_previously_open_routes_work_with_a_real_session(admin_client):
+    """The other half of the fix: a genuinely logged-in browser session
+    (what app.js's same-origin fetch now sends) must still work
+    normally - this isn't a lockout, it's closing an unintended
+    anonymous-access path."""
+    ticket_id = admin_client.post("/tickets", json={"description": "My VPN will not connect"}).json()["id"]
+
+    assert admin_client.get("/tickets").status_code == 200
+    assert admin_client.get(f"/tickets/{ticket_id}").status_code == 200
+    assert admin_client.get(f"/tickets/{ticket_id}/related").status_code == 200
+    assert admin_client.post(f"/tickets/{ticket_id}/suggest").status_code == 200
+
+
+def test_the_four_previously_open_routes_work_with_a_valid_api_key(auth_client):
+    """And machine/CLI clients using the API key (not a session) must
+    also still work - this is the "scoped service credentials for
+    machine clients" half of the review's recommended fix."""
+    ticket_id = auth_client.post(
+        "/tickets", json={"description": "test"}, headers={"X-API-Key": TEST_API_KEY}
+    ).json()["id"]
+
+    headers = {"X-API-Key": TEST_API_KEY}
+    assert auth_client.get("/tickets", headers=headers).status_code == 200
+    assert auth_client.get(f"/tickets/{ticket_id}", headers=headers).status_code == 200
+    assert auth_client.get(f"/tickets/{ticket_id}/related", headers=headers).status_code == 200
+    assert auth_client.post(f"/tickets/{ticket_id}/suggest", headers=headers).status_code == 200
+
+
+def test_wrong_api_key_still_rejected_on_the_four_routes(auth_client):
+    ticket_id = auth_client.post(
+        "/tickets", json={"description": "test"}, headers={"X-API-Key": TEST_API_KEY}
+    ).json()["id"]
+    wrong = {"X-API-Key": "not-the-real-key"}
+    assert auth_client.get("/tickets", headers=wrong).status_code == 401
+    assert auth_client.get(f"/tickets/{ticket_id}", headers=wrong).status_code == 401
 
 
 def test_auth_disabled_by_default(client):
@@ -66,7 +132,7 @@ def test_auth_disabled_by_default(client):
     assert resp.status_code == 201
 
 
-def test_ui_category_write_rejected_without_login(client):
+def test_ui_category_write_rejected_without_login(client, db_session):
     """
     Regression test for a real, confirmed security gap (see
     docs/current-state.md): the JSON API correctly rejected an
@@ -89,10 +155,13 @@ def test_ui_category_write_rejected_without_login(client):
     assert "/login" in resp.headers["location"]
 
     # Confirm it genuinely did not persist, not just that the response
-    # code looked right.
-    check = client.get(f"/tickets/{ticket['id']}").json()
-    assert check["category"] is None
-    assert check["category_confirmed"] is False
+    # code looked right - checked directly against the DB, not via
+    # another API call, since GET /tickets/{id} now requires auth too
+    # (a deliberate fix, not something this test should route around).
+    from app import crud
+    check = crud.get_ticket(db_session, ticket["id"])
+    assert check.category is None
+    assert check.category_confirmed == 0
 
 
 def test_ui_ticket_creation_rejected_without_login(client):
@@ -104,7 +173,7 @@ def test_ui_ticket_creation_rejected_without_login(client):
     assert "/login" in resp.headers["location"]
 
 
-def test_ui_status_update_rejected_without_login(client):
+def test_ui_status_update_rejected_without_login(client, db_session):
     ticket = client.post("/tickets", json={"description": "test"}).json()
     resp = client.post(
         f"/ui/tickets/{ticket['id']}/status", data={"status": "resolved", "csrf_token": "x", "version": ticket["version"]},
@@ -112,5 +181,6 @@ def test_ui_status_update_rejected_without_login(client):
     )
     assert resp.status_code == 303
     assert "/login" in resp.headers["location"]
-    check = client.get(f"/tickets/{ticket['id']}").json()
-    assert check["status"] == "open"
+    from app import crud
+    check = crud.get_ticket(db_session, ticket["id"])
+    assert check.status.value == "open"

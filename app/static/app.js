@@ -34,8 +34,13 @@ document.addEventListener("DOMContentLoaded", function () {
         setLoading(true);
         clearError();
 
-        fetch("/tickets/" + ticketId + "/suggest", { method: "POST" })
+        // credentials: "same-origin" made explicit, not relied on as a
+        // browser default - this endpoint now requires a real session
+        // (see require_session_or_api_key in app/auth.py), so the
+        // session cookie must actually be sent with this request.
+        fetch("/tickets/" + ticketId + "/suggest", { method: "POST", credentials: "same-origin" })
             .then(function (res) {
+                if (res.status === 401) throw new HttpError(401, "Your session expired - reload the page and log in again.");
                 if (res.status === 429) throw new HttpError(429, "You're doing that a bit fast — wait a moment and try again.");
                 if (!res.ok) throw new HttpError(res.status, "Something went wrong on the server (status " + res.status + "). Try again.");
                 return res.json();

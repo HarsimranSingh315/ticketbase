@@ -31,9 +31,9 @@ def _settings_with_llm(**overrides):
 
 
 @pytest.fixture
-def llm_client(client):
+def llm_client(admin_client):
     app.dependency_overrides[get_settings] = _settings_with_llm()
-    yield client
+    yield admin_client
     del app.dependency_overrides[get_settings]
 
 
@@ -45,10 +45,10 @@ def _mock_groq_response(text=FAKE_LLM_REPLY, status_code=200):
     return mock_resp
 
 
-def test_llm_disabled_by_default_uses_template(client):
-    # Plain `client` fixture has no LLM key configured.
-    ticket = client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = client.post(f"/tickets/{ticket['id']}/suggest")
+def test_llm_disabled_by_default_uses_template(admin_client):
+    # Plain `admin_client` has no LLM key configured, just a real session.
+    ticket = admin_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
     data = resp.json()
     assert data["draft_source"] == "template"
     assert "review and edit before sending" in data["draft_response"]

@@ -42,17 +42,17 @@ def test_priority_is_computed_correctly(client, description, expected_priority):
     assert resp.json()["priority"] == expected_priority
 
 
-def test_get_nonexistent_ticket_returns_404(client):
-    resp = client.get("/tickets/9999")
+def test_get_nonexistent_ticket_returns_404(admin_client):
+    resp = admin_client.get("/tickets/9999")
     assert resp.status_code == 404
 
 
-def test_list_tickets_filters_by_status(client):
-    client.post("/tickets", json={"description": "ticket one"})
-    ticket_two = client.post("/tickets", json={"description": "ticket two"}).json()
-    client.patch(f"/tickets/{ticket_two['id']}/status", json={"status": "resolved", "version": 1})
-    open_tickets = client.get("/tickets", params={"status": "open"}).json()
-    resolved_tickets = client.get("/tickets", params={"status": "resolved"}).json()
+def test_list_tickets_filters_by_status(admin_client):
+    admin_client.post("/tickets", json={"description": "ticket one"})
+    ticket_two = admin_client.post("/tickets", json={"description": "ticket two"}).json()
+    admin_client.patch(f"/tickets/{ticket_two['id']}/status", json={"status": "resolved", "version": 1})
+    open_tickets = admin_client.get("/tickets", params={"status": "open"}).json()
+    resolved_tickets = admin_client.get("/tickets", params={"status": "resolved"}).json()
     assert len(open_tickets) == 1
     assert len(resolved_tickets) == 1
     assert resolved_tickets[0]["id"] == ticket_two["id"]
@@ -79,28 +79,28 @@ def test_invalid_status_value_is_rejected(client):
     assert resp.status_code == 422
 
 
-def test_list_tickets_search_by_description(client):
-    client.post("/tickets", json={"description": "My VPN will not connect"})
-    client.post("/tickets", json={"description": "Charged twice for my order"})
-    client.post("/tickets", json={"description": "Printer is offline"})
+def test_list_tickets_search_by_description(admin_client):
+    admin_client.post("/tickets", json={"description": "My VPN will not connect"})
+    admin_client.post("/tickets", json={"description": "Charged twice for my order"})
+    admin_client.post("/tickets", json={"description": "Printer is offline"})
 
-    results = client.get("/tickets", params={"q": "VPN"}).json()
+    results = admin_client.get("/tickets", params={"q": "VPN"}).json()
     assert len(results) == 1
     assert "VPN" in results[0]["description"]
 
     # Search is case-insensitive
-    results_lower = client.get("/tickets", params={"q": "vpn"}).json()
+    results_lower = admin_client.get("/tickets", params={"q": "vpn"}).json()
     assert len(results_lower) == 1
 
-    no_match = client.get("/tickets", params={"q": "nonexistent-keyword-xyz"}).json()
+    no_match = admin_client.get("/tickets", params={"q": "nonexistent-keyword-xyz"}).json()
     assert no_match == []
 
 
-def test_list_tickets_search_combines_with_status_filter(client):
-    t1 = client.post("/tickets", json={"description": "VPN connection issue"}).json()
-    t2 = client.post("/tickets", json={"description": "VPN certificate expired"}).json()
-    client.patch(f"/tickets/{t2['id']}/status", json={"status": "resolved", "version": 1})
+def test_list_tickets_search_combines_with_status_filter(admin_client):
+    t1 = admin_client.post("/tickets", json={"description": "VPN connection issue"}).json()
+    t2 = admin_client.post("/tickets", json={"description": "VPN certificate expired"}).json()
+    admin_client.patch(f"/tickets/{t2['id']}/status", json={"status": "resolved", "version": 1})
 
-    open_vpn = client.get("/tickets", params={"q": "VPN", "status": "open"}).json()
+    open_vpn = admin_client.get("/tickets", params={"q": "VPN", "status": "open"}).json()
     assert len(open_vpn) == 1
     assert open_vpn[0]["id"] == t1["id"]

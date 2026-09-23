@@ -197,7 +197,7 @@ def test_json_api_write_creates_audit_event_with_no_actor(client, db_session):
 
 # --- Optimistic concurrency ---
 
-def test_json_api_stale_write_rejected_with_409(client):
+def test_json_api_stale_write_rejected_with_409(client, db_session):
     ticket = client.post("/tickets", json={"description": "test"}).json()
     # First write succeeds and bumps the version.
     first = client.patch(f"/tickets/{ticket['id']}/status", json={"status": "in_progress", "version": ticket["version"]})
@@ -207,9 +207,11 @@ def test_json_api_stale_write_rejected_with_409(client):
     stale = client.patch(f"/tickets/{ticket['id']}/status", json={"status": "resolved", "version": ticket["version"]})
     assert stale.status_code == 409
 
-    # The first write's result must stand, not be overwritten.
-    current = client.get(f"/tickets/{ticket['id']}").json()
-    assert current["status"] == "in_progress"
+    # The first write's result must stand, not be overwritten - checked
+    # directly against the DB since GET /tickets/{id} now requires auth.
+    from app import crud
+    current = crud.get_ticket(db_session, ticket["id"])
+    assert current.status.value == "in_progress"
 
 
 def test_ui_stale_write_rejected_and_shows_current_state(admin_client):

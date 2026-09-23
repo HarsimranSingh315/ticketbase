@@ -89,6 +89,37 @@ def require_agent(request: Request, db: DBSession = Depends(get_db)) -> User:
     return user
 
 
+def require_session_or_api_key(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+    db: DBSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """
+    Protects private JSON routes that the browser's OWN same-origin JS
+    also calls (app.js's AJAX suggestion request uses the session
+    cookie it already has) - these must accept EITHER a real logged-in
+    session OR a valid API key, and reject everything else. Deliberately
+    does NOT no-op when settings.api_key is empty, unlike
+    require_api_key above: that permissive fallback on these specific
+    routes was a real, live P0 finding (unauthenticated GET /tickets,
+    GET /tickets/{id}, GET /tickets/{id}/related, and POST
+    /tickets/{id}/suggest all returned real ticket data to anonymous
+    requests - see docs/current-state.md's production-readiness
+    section for how this was found and fixed). Without a configured API
+    key, only a real session works here; with one configured, either
+    does - never "neither, and it's still fine."
+    """
+    if x_api_key and settings.api_key and x_api_key == settings.api_key:
+        return
+    if get_current_user(request, db) is not None:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required - log in via the browser, or send a valid X-API-Key header.",
+    )
+
+
 def require_role(*roles: UserRole):
     """
     Factory: require_role(UserRole.admin, UserRole.agent) etc. Layers on

@@ -9,9 +9,9 @@ conftest.py.
 """
 
 
-def test_suggest_returns_relevant_category_with_sources(client):
-    ticket = client.post("/tickets", json={"description": "My VPN will not connect to the office"}).json()
-    resp = client.post(f"/tickets/{ticket['id']}/suggest")
+def test_suggest_returns_relevant_category_with_sources(admin_client):
+    ticket = admin_client.post("/tickets", json={"description": "My VPN will not connect to the office"}).json()
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
     assert resp.status_code == 200
     data = resp.json()
     assert data["abstained"] is False
@@ -21,27 +21,27 @@ def test_suggest_returns_relevant_category_with_sources(client):
     assert "draft_response" in data and len(data["draft_response"]) > 0
 
 
-def test_suggest_never_writes_to_the_ticket(client):
-    ticket = client.post("/tickets", json={"description": "Charged twice for my subscription"}).json()
-    client.post(f"/tickets/{ticket['id']}/suggest")
+def test_suggest_never_writes_to_the_ticket(admin_client):
+    ticket = admin_client.post("/tickets", json={"description": "Charged twice for my subscription"}).json()
+    admin_client.post(f"/tickets/{ticket['id']}/suggest")
     # Re-fetch the ticket: category must still be unset, since suggest
     # is read-only and only confirm_category is allowed to write it.
-    refetched = client.get(f"/tickets/{ticket['id']}").json()
+    refetched = admin_client.get(f"/tickets/{ticket['id']}").json()
     assert refetched["category"] is None
     assert refetched["category_confirmed"] is False
 
 
-def test_suggest_on_nonexistent_ticket_returns_404(client):
-    resp = client.post("/tickets/9999/suggest")
+def test_suggest_on_nonexistent_ticket_returns_404(admin_client):
+    resp = admin_client.post("/tickets/9999/suggest")
     assert resp.status_code == 404
 
 
-def test_suggest_then_confirm_accepts_the_suggested_category(client):
-    ticket = client.post("/tickets", json={"description": "Suspicious login on my account, is this a breach?"}).json()
-    suggestion = client.post(f"/tickets/{ticket['id']}/suggest").json()
+def test_suggest_then_confirm_accepts_the_suggested_category(admin_client):
+    ticket = admin_client.post("/tickets", json={"description": "Suspicious login on my account, is this a breach?"}).json()
+    suggestion = admin_client.post(f"/tickets/{ticket['id']}/suggest").json()
     assert suggestion["abstained"] is False
 
-    confirm_resp = client.patch(
+    confirm_resp = admin_client.patch(
         f"/tickets/{ticket['id']}/category", json={"category": suggestion["category"], "version": ticket["version"]}
     )
     assert confirm_resp.status_code == 200
@@ -50,9 +50,9 @@ def test_suggest_then_confirm_accepts_the_suggested_category(client):
     assert updated["category_confirmed"] is True
 
 
-def test_suggest_abstains_on_unrelated_gibberish(client):
-    ticket = client.post("/tickets", json={"description": "xk qz zzz flumox glorbnax"}).json()
-    resp = client.post(f"/tickets/{ticket['id']}/suggest")
+def test_suggest_abstains_on_unrelated_gibberish(admin_client):
+    ticket = admin_client.post("/tickets", json={"description": "xk qz zzz flumox glorbnax"}).json()
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
     data = resp.json()
     assert data["abstained"] is True
     assert data["category"] is None

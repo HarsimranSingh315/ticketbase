@@ -35,7 +35,7 @@ from app.config import get_settings, Settings
 from app.database import engine, Base, get_db, SessionLocal
 from app import crud, schemas
 from app.auth import (
-    require_api_key, require_agent, require_role, require_csrf,
+    require_api_key, require_agent, require_role, require_csrf, require_session_or_api_key,
     get_current_user, csrf_token_for_template, AuthRedirect, SESSION_COOKIE_NAME,
 )
 from app.models import User, UserRole
@@ -182,7 +182,7 @@ def create_ticket(payload: schemas.TicketCreate, db: Session = Depends(get_db)):
     return ticket
 
 
-@app.get("/tickets", response_model=list[schemas.TicketOut])
+@app.get("/tickets", response_model=list[schemas.TicketOut], dependencies=[Depends(require_session_or_api_key)])
 def list_tickets(
     status: Optional[str] = None,
     priority: Optional[str] = None,
@@ -194,7 +194,7 @@ def list_tickets(
     return crud.list_tickets(db, status=status, priority=priority, q=q, limit=limit, offset=offset)
 
 
-@app.get("/tickets/{ticket_id}", response_model=schemas.TicketOut)
+@app.get("/tickets/{ticket_id}", response_model=schemas.TicketOut, dependencies=[Depends(require_session_or_api_key)])
 def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
     ticket = crud.get_ticket(db, ticket_id)
     if ticket is None:
@@ -233,7 +233,7 @@ def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfi
     return ticket
 
 
-@app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut)
+@app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut, dependencies=[Depends(require_session_or_api_key)])
 @limiter.limit(settings.suggest_rate_limit)
 def suggest_ticket_category(
     request: Request, ticket_id: int,
@@ -264,7 +264,7 @@ def suggest_ticket_category(
     )
 
 
-@app.get("/tickets/{ticket_id}/related", response_model=list[schemas.RelatedTicketOut])
+@app.get("/tickets/{ticket_id}/related", response_model=list[schemas.RelatedTicketOut], dependencies=[Depends(require_session_or_api_key)])
 def get_related_tickets(
     ticket_id: int,
     db: Session = Depends(get_db),
