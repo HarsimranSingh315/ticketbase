@@ -1391,3 +1391,77 @@ parent-resource relationship checks, the P2 open-redirect, browser
 input-validation gaps, rate-limiting/CSP deployment hardening, the P1
 telephony-as-real-conversation-workflow gap, the P2 RAG confidence/
 versioning findings, and the operational-scale items.
+
+---
+
+## Third round: parent-resource relationship checks + open redirect
+
+### P1/P2 — Parent resource relationships were not enforced
+
+Verified directly, both claims confirmed exactly as described:
+`ui_update_draft_message` and `ui_approve_message` took both
+`ticket_id` and `message_id` from the URL, but the underlying
+`crud.update_draft`/`crud.approve_message` only ever looked up the
+message by `message_id` - a message could be edited or approved
+through a completely different ticket's URL (typo, stale tab, guessed
+ID) and it would silently succeed. `ui_place_outbound_call` checked
+that a contact existed and had a phone number, but never that it
+actually belonged to the customer linked to the ticket placing the
+call.
+
+**Fix:** both message routes now confirm `message.ticket_id ==
+ticket_id` before any write - checked as a pure read first, so a
+mismatch returns 404 before any side effect, matching the review's own
+"return 404/403 before side effects on a mismatch." The call route now
+confirms `contact.customer_id == ticket.customer_id`, and explicitly
+rejects placing a call from a ticket with no customer linked at all
+(no relationship to check against means no valid call, not "anything
+goes"). Also cleaned up genuine dead code found while reading this
+function - `_render_call_error` had an unreachable, incorrectly-pasted
+duplicate of `_render_conflict`'s body sitting after its own `return`
+statement.
+
+4 new tests, all passing on first run: editing/approving a message
+through the wrong ticket's URL (both correctly rejected, confirmed
+unchanged in the DB), calling a contact belonging to a different
+customer (rejected), and calling any contact when the ticket has no
+customer linked (rejected).
+
+### P2 — Unvalidated post-login redirect (open redirect)
+
+Verified directly: `login_submit` passed the `next` form field straight
+to `RedirectResponse` with no check at all - `next=https://evil.com`
+would work exactly as an attacker would want, and because the login
+itself is completely genuine (real credentials, real session created),
+this is the class of open redirect that's actually useful for
+phishing, not just a curiosity.
+
+**Fix:** `_is_safe_redirect_path` requires a genuine same-origin
+relative path - starts with exactly one `/`, not `//` or `/\` (a
+known bypass some browsers normalize), no scheme markers. Anything
+that fails the check falls back to `/`, never an error - a forged
+`next` value degrades to "just go to the ticket list," not a broken
+login. 2 new tests via the real login flow (not just the helper in
+isolation): the normal relative-path case still works, and five
+different attack shapes (`https://`, `http://`, `//evil.com`,
+`/\evil.com`, `javascript:`) are all confirmed rejected with the safe
+fallback.
+
+### Test suite
+
+```
+$ python -m pytest -q                                     # SQLite
+180 passed, 5 skipped
+$ TEST_DATABASE_URL=postgresql://... python -m pytest -q  # Postgres
+185 passed
+```
+
+### What from the review is still NOT addressed
+
+Both P1s and this P2 are now fixed. Still open: the P2 browser input-
+validation and session/invite-token-hashing gaps (shared validation
+models, bounded text sizes, hashed tokens at rest, CSRF on login/
+logout), the P2 rate-limiting/CSP/trusted-host deployment hardening,
+the P1 telephony-as-real-conversation-workflow gap, the P2 RAG
+confidence/versioning findings, and the operational-scale items
+(thousand-line files, N+1 queries, explicit seeding).

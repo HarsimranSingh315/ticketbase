@@ -541,3 +541,67 @@ def test_approve_message_propagates_configured_max_attempts(db_session):
 
     job = db_session.query(OutboxJob).filter(OutboxJob.message_id == message.id).first()
     assert job.max_attempts == 9
+
+
+def test_editing_a_message_through_the_wrong_ticket_url_is_rejected(admin_client, db_session):
+    """
+    A real relationship-integrity gap an external review found: the
+    route took both ticket_id and message_id from the URL, but the
+    underlying crud function only ever looked up the message by
+    message_id - a message could be edited through a completely
+    different ticket's URL (typo, stale tab, guessed ID) and it would
+    silently work.
+    """
+    from tests.conftest import get_csrf_token
+    ticket_a = admin_client.post("/tickets", json={"description": "ticket A"}).json()
+    ticket_b = admin_client.post("/tickets", json={"description": "ticket B"}).json()
+
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{ticket_a['id']}")
+    admin_client.post(
+        f"/ui/tickets/{ticket_a['id']}/messages",
+        data={"recipient_email": "x@example.com", "subject": "x", "body": "x", "csrf_token": csrf},
+    )
+    from app import crud
+    message = crud.list_messages_for_ticket(db_session, ticket_a["id"])[0]
+    message_id, message_version = message.id, message.version
+
+    # Try to edit ticket A's real message, but through ticket B's URL.
+    csrf2 = get_csrf_token(admin_client, f"/ui/tickets/{ticket_b['id']}")
+    resp = admin_client.post(
+        f"/ui/tickets/{ticket_b['id']}/messages/{message_id}",
+        data={"recipient_email": "attacker@evil.com", "subject": "changed", "body": "changed", "version": message_version, "csrf_token": csrf2},
+    )
+    assert resp.status_code == 404
+
+    # And confirm it genuinely wasn't touched.
+    db_session.expire_all()
+    unchanged = crud.get_message(db_session, message_id)
+    assert unchanged.subject == "x"
+
+
+def test_approving_a_message_through_the_wrong_ticket_url_is_rejected(admin_client, db_session):
+    """Same relationship check, for approval - arguably more important
+    here, since approving queues a real send."""
+    from tests.conftest import get_csrf_token
+    ticket_a = admin_client.post("/tickets", json={"description": "ticket A"}).json()
+    ticket_b = admin_client.post("/tickets", json={"description": "ticket B"}).json()
+
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{ticket_a['id']}")
+    admin_client.post(
+        f"/ui/tickets/{ticket_a['id']}/messages",
+        data={"recipient_email": "x@example.com", "subject": "x", "body": "x", "csrf_token": csrf},
+    )
+    from app import crud
+    message = crud.list_messages_for_ticket(db_session, ticket_a["id"])[0]
+    message_id, message_version = message.id, message.version
+
+    csrf2 = get_csrf_token(admin_client, f"/ui/tickets/{ticket_b['id']}")
+    resp = admin_client.post(
+        f"/ui/tickets/{ticket_b['id']}/messages/{message_id}/approve",
+        data={"version": message_version, "csrf_token": csrf2},
+    )
+    assert resp.status_code == 404
+
+    db_session.expire_all()
+    unchanged = crud.get_message(db_session, message_id)
+    assert unchanged.status.value == "draft"  # never approved, no job ever queued

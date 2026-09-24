@@ -184,3 +184,43 @@ def test_ui_status_update_rejected_without_login(client, db_session):
     from app import crud
     check = crud.get_ticket(db_session, ticket["id"])
     assert check.status.value == "open"
+
+
+def test_login_redirects_to_safe_relative_next_path(admin_client, db_session):
+    """The normal, intended case still works after the fix."""
+    from app.models import User, UserRole
+    from app.security import hash_password
+    user = User(email="redirtest1@example.com", name="RedirTest1", password_hash=hash_password("password123"), role=UserRole.agent)
+    db_session.add(user)
+    db_session.commit()
+
+    resp = admin_client.post(
+        "/login", data={"email": "redirtest1@example.com", "password": "password123", "next": "/kb"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/kb"
+
+
+def test_login_rejects_open_redirect_to_external_site(admin_client, db_session):
+    """
+    A real open redirect an external review found: `next` was passed
+    straight to RedirectResponse with no check at all. An attacker
+    could craft a login link with next=https://evil.com and, after a
+    real successful login on the real site, send the user on to a
+    phishing page - the login itself being genuine is exactly what
+    makes this dangerous.
+    """
+    from app.models import User, UserRole
+    from app.security import hash_password
+    user = User(email="redirtest2@example.com", name="RedirTest2", password_hash=hash_password("password123"), role=UserRole.agent)
+    db_session.add(user)
+    db_session.commit()
+
+    for malicious_next in ["https://evil.com/phishing", "http://evil.com", "//evil.com", "/\\evil.com", "javascript:alert(1)"]:
+        resp = admin_client.post(
+            "/login", data={"email": "redirtest2@example.com", "password": "password123", "next": malicious_next},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/", f"expected safe fallback for next={malicious_next!r}, got {resp.headers['location']!r}"

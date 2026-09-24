@@ -202,3 +202,56 @@ def test_placed_call_appears_in_ticket_call_history(admin_client, db_session, mo
     assert "Outbound call" in detail.text
     assert "queued" in detail.text
     get_settings.cache_clear()
+
+
+def test_cannot_call_a_contact_belonging_to_a_different_customer(admin_client, db_session, monkeypatch):
+    """
+    A real relationship-integrity gap an external review found:
+    ui_place_outbound_call checked that the contact existed, but never
+    that it actually belonged to the ticket's own linked customer - any
+    valid contact_id anywhere in the system could be dialed from any
+    ticket's call button.
+    """
+    from app import crud
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+18005551212")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    customer_a = crud.create_customer(db_session, "Customer A")
+    customer_b = crud.create_customer(db_session, "Customer B")
+    contact_a = crud.create_contact(db_session, customer_id=customer_a.id, name="Contact A", phone="+15551111111")
+    contact_b = crud.create_contact(db_session, customer_id=customer_b.id, name="Contact B", phone="+15552222222")
+
+    ticket = admin_client.post("/tickets", json={"description": "test"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{ticket['id']}")
+    admin_client.post(f"/ui/tickets/{ticket['id']}/customer", data={"customer_id": customer_a.id, "version": ticket["version"], "csrf_token": csrf})
+
+    # Try to call Contact B (belongs to Customer B) from a ticket linked to Customer A.
+    csrf2 = get_csrf_token(admin_client, f"/ui/tickets/{ticket['id']}")
+    resp = admin_client.post(f"/ui/tickets/{ticket['id']}/call", data={"contact_id": contact_b.id, "csrf_token": csrf2})
+    assert resp.status_code == 404
+
+    # Calling the CORRECT contact (Customer A's own) still works.
+    csrf3 = get_csrf_token(admin_client, f"/ui/tickets/{ticket['id']}")
+    resp2 = admin_client.post(f"/ui/tickets/{ticket['id']}/call", data={"contact_id": contact_a.id, "csrf_token": csrf3}, follow_redirects=False)
+    assert resp2.status_code == 303
+    get_settings.cache_clear()
+
+
+def test_cannot_call_a_contact_when_ticket_has_no_customer_linked(admin_client, db_session, monkeypatch):
+    """A ticket with no customer linked has no valid relationship to
+    check against at all - this must be rejected, not treated as
+    "anything goes"."""
+    from app import crud
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+18005551212")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    customer = crud.create_customer(db_session, "Some Customer")
+    contact = crud.create_contact(db_session, customer_id=customer.id, name="A Contact", phone="+15553333333")
+
+    ticket = admin_client.post("/tickets", json={"description": "test, no customer linked"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{ticket['id']}")
+    resp = admin_client.post(f"/ui/tickets/{ticket['id']}/call", data={"contact_id": contact.id, "csrf_token": csrf})
+    assert resp.status_code == 404
+    get_settings.cache_clear()

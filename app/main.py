@@ -395,6 +395,27 @@ def login_form(request: Request, next: Optional[str] = None):
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": None})
 
 
+def _is_safe_redirect_path(path: Optional[str]) -> bool:
+    """
+    Only a genuine same-origin, relative application path is safe to
+    redirect to after login - anything else is a potential open
+    redirect (an external review found `next` was passed straight to
+    RedirectResponse with no check at all). Rejects: empty/missing,
+    anything not starting with a single `/` (catches absolute URLs and
+    scheme-based attacks like `javascript:`), and scheme-relative
+    forms (`//evil.com`, `/\\evil.com` - some browsers normalize a
+    leading backslash to a forward slash, a known bypass for a naive
+    `//` check alone).
+    """
+    if not path:
+        return False
+    if not path.startswith("/"):
+        return False
+    if path.startswith("//") or path.startswith("/\\"):
+        return False
+    return True
+
+
 @app.post("/login")
 @limiter.limit(settings.login_rate_limit)
 def login_submit(
@@ -417,7 +438,8 @@ def login_submit(
         )
 
     session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
-    response = RedirectResponse(url=next or "/", status_code=303)
+    safe_next = next if _is_safe_redirect_path(next) else "/"
+    response = RedirectResponse(url=safe_next, status_code=303)
     response.set_cookie(
         SESSION_COOKIE_NAME, session.id,
         httponly=True, samesite="lax", secure=settings.session_cookie_secure,
@@ -782,6 +804,16 @@ def ui_place_outbound_call(
     contact = crud.get_contact(db, contact_id)
     if contact is None or not contact.phone:
         raise HTTPException(status_code=404, detail="Contact not found or has no phone number on file")
+    # Confirms the contact actually belongs to the customer this ticket
+    # is linked to - an external review found this wasn't checked at
+    # all, meaning any valid contact_id (any customer's contact,
+    # anywhere in the system) could be dialed from any ticket's call
+    # button, regardless of whether it had anything to do with that
+    # ticket's actual customer. A ticket with no customer linked yet
+    # has no valid relationship to check against, so it's rejected too
+    # - not a special "anything goes" case.
+    if ticket.customer_id is None or contact.customer_id != ticket.customer_id:
+        raise HTTPException(status_code=404, detail="This contact is not associated with this ticket's customer")
 
     if not settings.twilio_phone_number:
         return _render_call_error(
@@ -814,20 +846,6 @@ def _render_call_error(request: Request, db: Session, ticket, rag_index: RAGInde
         conflict_error=f"Couldn't place the call: {error_message}",
     )
     return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=502)
-    """
-    Shared handling for a VersionConflict on any ticket write: re-render
-    the ticket page with the ticket's REAL current data (so the form the
-    agent sees is no longer stale) and a clear explanation of what
-    happened, rather than a generic error page or - worse - retrying
-    the write blind.
-    """
-    ticket = crud.get_ticket(db, ticket_id)
-    candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
-    context = _ticket_detail_context(
-        db, ticket, related, user, request, settings,
-        conflict_error="This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
-    )
     return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=409)
 
 
@@ -856,6 +874,18 @@ def ui_update_draft_message(
     db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
     rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
 ):
+    # Confirms the message genuinely belongs to the ticket named in the
+    # URL BEFORE any write - an external review found this wasn't
+    # checked at all: crud.update_draft looked up the message by
+    # message_id alone, so a valid agent hitting the wrong ticket_id in
+    # the URL (typo, stale tab, guessed ID) could silently edit a
+    # message under a completely different ticket. Checked here, not
+    # inside crud.update_draft, so it fails BEFORE any side effect -
+    # matching the review's own "return 404 before side effects on a
+    # mismatch."
+    existing = crud.get_message(db, message_id)
+    if existing is None or existing.ticket_id != ticket_id:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found on ticket {ticket_id}")
     try:
         message = crud.update_draft(db, message_id, recipient_email.strip(), subject.strip(), body, expected_version=version)
     except crud.VersionConflict:
@@ -880,6 +910,12 @@ def ui_approve_message(
     nothing else in the system can queue a send without this exact,
     authenticated, version-checked call happening first.
     """
+    # Same parent-relationship check as ui_update_draft_message, and
+    # for the same reason - approving a message queues a real send, so
+    # this check matters even more here than on an edit.
+    existing = crud.get_message(db, message_id)
+    if existing is None or existing.ticket_id != ticket_id:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found on ticket {ticket_id}")
     try:
         message = crud.approve_message(db, message_id, actor_user_id=user.id, expected_version=version, max_attempts=settings.outbox_max_attempts)
     except crud.VersionConflict:
