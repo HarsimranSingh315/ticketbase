@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import update as sa_update
 
 from app import models
 from app.models import User, Session as SessionModel, Invite, UserRole, Customer, Contact, AuditEvent
@@ -189,29 +190,82 @@ def get_ticket_stats(db: Session) -> dict:
     }
 
 
+def _atomic_ticket_update(
+    db: Session, ticket_id: int, expected_version: int, changes: dict,
+    actor_user_id: Optional[int], action: str, audit_details: dict,
+) -> Optional[models.Ticket]:
+    """
+    The real compare-and-swap fix for a genuine, externally-confirmed
+    bug: every ticket-write function below used to read a row, check
+    `version` in PYTHON, then write - a TOCTOU race. Two concurrent
+    requests could both read the same version, both pass the Python
+    check before either committed, and the second would silently
+    overwrite the first with no conflict ever raised. Verified directly
+    against two genuinely concurrent Postgres sessions racing on the
+    same ticket, which is what actually exposed it (sequential
+    stale-write tests - call once, then again with the old version -
+    only prove the check fires on a SECOND call; they don't touch this
+    race at all). See tests/test_concurrency_races.py.
+
+    This does what claim_next_job (below) already did correctly for
+    outbox jobs: a single real `UPDATE ... WHERE id=:id AND
+    version=:expected` statement. The database itself is what enforces
+    "only if nothing changed since you read it" - not a Python `if`
+    that runs milliseconds before a separate write. `changes` must
+    include a fresh `version` value (typically `models.Ticket.version
+    + 1`, a SQL-side expression, not a Python-side increment - the
+    increment has to happen in the SAME atomic statement as the
+    conflict check, or it reintroduces exactly the race being fixed).
+
+    Returns None if the ticket doesn't exist at all. Raises
+    VersionConflict if it exists but wasn't at expected_version -
+    these are deliberately distinguished (404 vs 409), which needs one
+    extra read, but only on the (uncommon) failure path.
+    """
+    result = db.execute(
+        sa_update(models.Ticket)
+        .where(models.Ticket.id == ticket_id, models.Ticket.version == expected_version)
+        .values(**changes)
+    )
+    if result.rowcount == 0:
+        # commit() here, not rollback() - matching claim_next_job's proven-safe
+        # pattern exactly. An UPDATE matching zero rows makes no changes, so
+        # committing it is always safe - and found, by actually running a genuine
+        # concurrent-session test, to matter beyond tidiness: on SQLite's shared
+        # StaticPool connection, one thread's rollback() can collide with another
+        # thread's already-completed commit() on the SAME physical connection,
+        # raising "cannot commit - no transaction is active". commit() doesn't
+        # have that failure mode. Also expires the identity map, same as any commit.
+        db.commit()
+        ticket = get_ticket(db, ticket_id)
+        if ticket is None:
+            return None
+        raise VersionConflict(ticket_id, expected_version, ticket.version)
+
+    _record_audit_event(db, actor_user_id, action, "ticket", ticket_id, details=audit_details)
+    db.commit()  # expire_on_commit=True (the default, unchanged in app/database.py) means the read below is genuinely fresh, not the identity map's stale copy
+    return get_ticket(db, ticket_id)
+
+
 def update_status(db: Session, ticket_id: int, status: str, expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
     """
     Raises VersionConflict if `expected_version` doesn't match the
     ticket's current version (someone else changed it first). Returns
     None if the ticket doesn't exist. Writes an audit event in the same
-    transaction as the status change.
+    transaction as the status change. See _atomic_ticket_update's
+    docstring for why this is a real atomic UPDATE, not a Python-side
+    check.
     """
-    ticket = get_ticket(db, ticket_id)
-    if ticket is None:
+    current = get_ticket(db, ticket_id)
+    if current is None:
         return None
-    if ticket.version != expected_version:
-        raise VersionConflict(ticket_id, expected_version, ticket.version)
-
-    old_status = ticket.status.value if hasattr(ticket.status, "value") else ticket.status
-    ticket.status = status
-    ticket.version += 1
-    _record_audit_event(
-        db, actor_user_id, "ticket.status_changed", "ticket", ticket_id,
-        details={"from": old_status, "to": status},
+    old_status = current.status.value if hasattr(current.status, "value") else current.status
+    return _atomic_ticket_update(
+        db, ticket_id, expected_version,
+        changes={"status": status, "version": models.Ticket.version + 1},
+        actor_user_id=actor_user_id, action="ticket.status_changed",
+        audit_details={"from": old_status, "to": status},
     )
-    db.commit()
-    db.refresh(ticket)
-    return ticket
 
 
 def confirm_category(db: Session, ticket_id: int, category: str, expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
@@ -223,64 +277,45 @@ def confirm_category(db: Session, ticket_id: int, category: str, expected_versio
     (an audit event), not just that it happened. Raises VersionConflict
     on a stale write, same as update_status.
     """
-    ticket = get_ticket(db, ticket_id)
-    if ticket is None:
+    current = get_ticket(db, ticket_id)
+    if current is None:
         return None
-    if ticket.version != expected_version:
-        raise VersionConflict(ticket_id, expected_version, ticket.version)
-
-    old_category = ticket.category
-    ticket.category = category
-    ticket.category_confirmed = 1
-    ticket.version += 1
-    _record_audit_event(
-        db, actor_user_id, "ticket.category_confirmed", "ticket", ticket_id,
-        details={"from": old_category, "to": category},
+    old_category = current.category
+    return _atomic_ticket_update(
+        db, ticket_id, expected_version,
+        changes={"category": category, "category_confirmed": 1, "version": models.Ticket.version + 1},
+        actor_user_id=actor_user_id, action="ticket.category_confirmed",
+        audit_details={"from": old_category, "to": category},
     )
-    db.commit()
-    db.refresh(ticket)
-    return ticket
 
 
 def assign_ticket(db: Session, ticket_id: int, assignee_user_id: Optional[int], expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
     """Assigns (or, with assignee_user_id=None, unassigns) a ticket.
     Same version-conflict and audit-trail pattern as the other writes."""
-    ticket = get_ticket(db, ticket_id)
-    if ticket is None:
+    current = get_ticket(db, ticket_id)
+    if current is None:
         return None
-    if ticket.version != expected_version:
-        raise VersionConflict(ticket_id, expected_version, ticket.version)
-
-    old_assignee = ticket.assignee_id
-    ticket.assignee_id = assignee_user_id
-    ticket.version += 1
-    _record_audit_event(
-        db, actor_user_id, "ticket.assigned", "ticket", ticket_id,
-        details={"from": old_assignee, "to": assignee_user_id},
+    old_assignee = current.assignee_id
+    return _atomic_ticket_update(
+        db, ticket_id, expected_version,
+        changes={"assignee_id": assignee_user_id, "version": models.Ticket.version + 1},
+        actor_user_id=actor_user_id, action="ticket.assigned",
+        audit_details={"from": old_assignee, "to": assignee_user_id},
     )
-    db.commit()
-    db.refresh(ticket)
-    return ticket
 
 
 def link_ticket_to_customer(db: Session, ticket_id: int, customer_id: Optional[int], expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
     """Links (or unlinks) a ticket to a customer record."""
-    ticket = get_ticket(db, ticket_id)
-    if ticket is None:
+    current = get_ticket(db, ticket_id)
+    if current is None:
         return None
-    if ticket.version != expected_version:
-        raise VersionConflict(ticket_id, expected_version, ticket.version)
-
-    old_customer = ticket.customer_id
-    ticket.customer_id = customer_id
-    ticket.version += 1
-    _record_audit_event(
-        db, actor_user_id, "ticket.customer_linked", "ticket", ticket_id,
-        details={"from": old_customer, "to": customer_id},
+    old_customer = current.customer_id
+    return _atomic_ticket_update(
+        db, ticket_id, expected_version,
+        changes={"customer_id": customer_id, "version": models.Ticket.version + 1},
+        actor_user_id=actor_user_id, action="ticket.customer_linked",
+        audit_details={"from": old_customer, "to": customer_id},
     )
-    db.commit()
-    db.refresh(ticket)
-    return ticket
 
 
 # --- Customers & contacts ---
@@ -505,27 +540,55 @@ def list_messages_for_ticket(db: Session, ticket_id: int) -> list[OutboundMessag
     )
 
 
+def _atomic_message_update(db: Session, message_id: int, expected_version: int, changes: dict) -> Optional[OutboundMessage]:
+    """
+    Same compare-and-swap fix as _atomic_ticket_update, for messages -
+    also checks status='draft' in the SAME atomic WHERE clause, not as
+    a separate Python check. This closes the exact race the external
+    review named by pointing at this function specifically: "a draft
+    edit racing approval can undermine the relationship between the
+    displayed draft and its approved snapshot" - a concurrent approval
+    changes both version AND status, and the old Python-side check
+    only ever compared version, not status, so a well-timed edit could
+    still land after an approval's read but before its write.
+    """
+    result = db.execute(
+        sa_update(OutboundMessage)
+        .where(
+            OutboundMessage.id == message_id,
+            OutboundMessage.version == expected_version,
+            OutboundMessage.status == MessageStatus.draft,
+        )
+        .values(**changes)
+    )
+    if result.rowcount == 0:
+        db.commit()  # not rollback() - see _atomic_ticket_update's comment for why that matters, not just style
+        message = get_message(db, message_id)
+        if message is None:
+            return None
+        if message.status != MessageStatus.draft:
+            raise MessageNotDraft(message_id, message.status.value)
+        raise VersionConflict(message_id, expected_version, message.version)
+
+    db.commit()
+    return get_message(db, message_id)
+
+
 def update_draft(db: Session, message_id: int, recipient_email: str, subject: str, body: str, expected_version: int) -> Optional[OutboundMessage]:
     """Edits a draft's live fields. Raises MessageNotDraft if the
     message has already been approved - this is the enforcement point
     for "editing after approval is not allowed" on the write path (the
     UI also hides the edit form once approved - this is the real
-    guarantee, that isn't)."""
-    message = get_message(db, message_id)
-    if message is None:
-        return None
-    if message.status != MessageStatus.draft:
-        raise MessageNotDraft(message_id, message.status.value)
-    if message.version != expected_version:
-        raise VersionConflict(message_id, expected_version, message.version)
-
-    message.recipient_email = recipient_email
-    message.subject = subject
-    message.body = body
-    message.version += 1
-    db.commit()
-    db.refresh(message)
-    return message
+    guarantee, that isn't). See _atomic_message_update's docstring for
+    why the draft-status check is now inside the same atomic UPDATE as
+    the version check, not a separate Python comparison."""
+    return _atomic_message_update(
+        db, message_id, expected_version,
+        changes={
+            "recipient_email": recipient_email, "subject": subject, "body": body,
+            "version": OutboundMessage.version + 1,
+        },
+    )
 
 
 def approve_message(db: Session, message_id: int, actor_user_id: int, expected_version: int) -> Optional[OutboundMessage]:
@@ -537,28 +600,46 @@ def approve_message(db: Session, message_id: int, actor_user_id: int, expected_v
     never queued (or queued without ever having been approved). The
     OutboxJob's operation_key is derived deterministically from the
     message ID, not freshly generated - so even if this function were
-    somehow called twice for the same message (it can't be: the
-    `status != draft` check below and the route's own guard both
-    prevent it, and the column-level UNIQUE constraint on
-    OutboxJob.message_id is a third, structural backstop), only one
-    job could ever exist for it.
-    """
-    message = get_message(db, message_id)
-    if message is None:
-        return None
-    if message.status != MessageStatus.draft:
-        raise MessageNotDraft(message_id, message.status.value)
-    if message.version != expected_version:
-        raise VersionConflict(message_id, expected_version, message.version)
+    somehow called twice for the same message, only one job could ever
+    exist for it (the column-level UNIQUE constraint on
+    OutboxJob.message_id is the structural backstop).
 
+    Now a real atomic `UPDATE ... WHERE id=:id AND version=:expected
+    AND status='draft'`, not a read-then-write - see
+    _atomic_message_update's docstring for the race this closes. The
+    approved_* snapshot columns are set via `SET approved_subject =
+    subject` (a same-row column reference evaluated BY THE DATABASE,
+    not a value read moments earlier by Python) - so the snapshot is
+    guaranteed to reflect exactly what the row held at the instant this
+    UPDATE's WHERE clause matched, which is the actual point of an
+    "immutable approved snapshot" in the first place.
+    """
     now = _utcnow()
-    message.status = MessageStatus.approved
-    message.approved_by_user_id = actor_user_id
-    message.approved_at = now
-    message.approved_recipient_email = message.recipient_email
-    message.approved_subject = message.subject
-    message.approved_body = message.body
-    message.version += 1
+    result = db.execute(
+        sa_update(OutboundMessage)
+        .where(
+            OutboundMessage.id == message_id,
+            OutboundMessage.version == expected_version,
+            OutboundMessage.status == MessageStatus.draft,
+        )
+        .values(
+            status=MessageStatus.approved,
+            approved_by_user_id=actor_user_id,
+            approved_at=now,
+            approved_recipient_email=OutboundMessage.recipient_email,
+            approved_subject=OutboundMessage.subject,
+            approved_body=OutboundMessage.body,
+            version=OutboundMessage.version + 1,
+        )
+    )
+    if result.rowcount == 0:
+        db.commit()  # not rollback() - see _atomic_ticket_update's comment for why that matters, not just style
+        message = get_message(db, message_id)
+        if message is None:
+            return None
+        if message.status != MessageStatus.draft:
+            raise MessageNotDraft(message_id, message.status.value)
+        raise VersionConflict(message_id, expected_version, message.version)
 
     job = OutboxJob(
         operation_key=f"message-{message_id}",
@@ -568,14 +649,18 @@ def approve_message(db: Session, message_id: int, actor_user_id: int, expected_v
     )
     db.add(job)
 
+    # Reads the just-written (still-uncommitted, same-transaction)
+    # approved_recipient_email for the audit record - a fresh read, not
+    # a stale identity-mapped object, since this is the first read of
+    # this row in this function.
+    updated_message = get_message(db, message_id)
     _record_audit_event(
         db, actor_user_id, "message.approved", "outbound_message", message_id,
-        details={"recipient": message.approved_recipient_email},
+        details={"recipient": updated_message.approved_recipient_email},
     )
 
     db.commit()
-    db.refresh(message)
-    return message
+    return get_message(db, message_id)
 
 
 def get_outbox_job_for_message(db: Session, message_id: int) -> Optional[OutboxJob]:

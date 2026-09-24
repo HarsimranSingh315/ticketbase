@@ -326,9 +326,24 @@ def test_concurrent_workers_racing_for_the_same_job_only_one_wins(db_session):
 
     results = []
 
+    # A real threading.Barrier forces both threads to actually reach
+    # their claim attempt at the same instant, rather than the
+    # misleading version this test used to have: t1.start(); t1.join()
+    # BEFORE t2 even started, which is fully sequential regardless of
+    # using two Thread objects - flagged correctly by an external
+    # review, since it exercises the right CODE PATH but proves nothing
+    # about actual concurrent access. On SQLite (StaticPool, one shared
+    # connection) the database operations still serialize even with the
+    # barrier, but the two claim attempts now genuinely interleave at
+    # the point they're issued - and on real Postgres (see
+    # docs/current-state.md's verification with a real barrier and two
+    # separate connections), this is a genuine, no-caveats race.
+    barrier = threading.Barrier(2)
+
     def claim_in_own_session(worker_id):
         session = TestSessionLocal()
         try:
+            barrier.wait()
             claimed = crud.claim_next_job(session, worker_id, lease_seconds=60)
             results.append((worker_id, claimed.id if claimed else None))
         finally:
@@ -337,12 +352,9 @@ def test_concurrent_workers_racing_for_the_same_job_only_one_wins(db_session):
     t1 = threading.Thread(target=claim_in_own_session, args=("worker-A",))
     t2 = threading.Thread(target=claim_in_own_session, args=("worker-B",))
     t1.start()
-    t1.join()  # SQLite (StaticPool, single connection) can't truly run these
-    t2.start()  # concurrently without serializing - run sequentially here,
-    t2.join()   # which still exercises the real compare-and-swap logic:
-    # whichever ran first flips status to 'claimed', so the second's
-    # WHERE status=<expected old status> UPDATE correctly matches zero
-    # rows and returns None - the same code path a true race hits.
+    t2.start()
+    t1.join()
+    t2.join()
 
     winners = [r for r in results if r[1] is not None]
     losers = [r for r in results if r[1] is None]

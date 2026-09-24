@@ -1170,3 +1170,135 @@ would need a shared backend (e.g. Redis) if ever scaled to multiple
 app replicas. `BOOTSTRAP_ADMIN_EMAIL`/`PASSWORD` must still be unset
 after first use in any real deployment, exactly as `.env.example`
 already says.
+
+---
+
+## Response to an external production-readiness review (P0/P1 fixes)
+
+An external review of `ticketbase-all-three-features.zip` (23 September
+2026) found two severe, evidence-backed issues. Both were independently
+verified against the actual code before any fix was made - not trusted,
+not dismissed.
+
+### P0: four routes had genuinely no authentication - live, exploitable
+
+`GET /tickets`, `GET /tickets/{id}`, `GET /tickets/{id}/related`, and
+`POST /tickets/{id}/suggest` had no auth dependency at all - confirmed
+by reading the route decorators directly. With the default empty
+`API_KEY` (which this project's own earlier deployment guidance told
+the user to leave blank), these routes were fully public: any
+anonymous request returned real ticket data. This traces to a real
+mistake in that earlier guidance, not just a code gap - worth owning
+plainly rather than glossing over.
+
+**Fix:** a new `require_session_or_api_key` dependency (accepts a real
+browser session OR a valid API key, never neither, regardless of
+whether `API_KEY` is configured) applied to all four routes.
+`app/static/app.js` updated to send its session cookie explicitly
+(`credentials: "same-origin"`) rather than relying on default fetch
+behavior. Fixed 25 existing tests broken by the change - including
+rewriting one test whose entire purpose was asserting the OLD, now-
+wrong behavior - and added 5 new tests asserting the security property
+directly: anonymous rejected, session accepted, API key accepted,
+wrong key rejected, all across all four routes.
+
+### P1: ticket/message writes had a real TOCTOU race, not just "sequential-tested"
+
+Every ticket-write function (`update_status`, `confirm_category`,
+`assign_ticket`, `link_ticket_to_customer`) and message-write function
+(`update_draft`, `approve_message`) read a row, checked `version` in
+PYTHON, then wrote - not an atomic database operation. Two concurrent
+requests could both pass the check before either committed, letting
+the second silently overwrite the first with no conflict ever raised.
+
+This project's own earlier confidence here was incomplete, not wrong
+by intent: the existing tests used SEQUENTIAL stale writes (call once,
+then again with the old version), which only proves the check fires on
+a SECOND call - it says nothing about two calls racing at the same
+instant. The project had already built the CORRECT pattern once, for
+outbox job claiming (`claim_next_job`, a real compare-and-swap `UPDATE
+... WHERE status=<expected>`, verified with a genuine concurrent
+Postgres race) - this fix just never got applied to ticket/message
+writes, which is a real inconsistency in engineering rigor across the
+same codebase, worth naming rather than smoothing over.
+
+**Fix:** every affected function now issues a real `UPDATE ... WHERE
+id=:id AND version=:expected` (and, for messages, `AND
+status='draft'`, closing the specific draft-edit-racing-approval
+scenario the review named), checking the affected-row count rather
+than a Python comparison. `approve_message`'s snapshot columns
+(`approved_subject`, etc.) are set via same-row SQL column references
+(`SET approved_subject = subject`), evaluated by the database at the
+instant the WHERE clause matches - not a value read moments earlier by
+Python, which is the actual point of an "immutable snapshot."
+
+**A second real bug found while verifying this fix, not before
+shipping it:** the first version used `db.rollback()` on the "lost the
+race" path. Running genuine concurrent-thread tests against SQLite
+surfaced `OperationalError: cannot commit - no transaction is active`
+- one thread's rollback colliding with another thread's already-
+completed commit on SQLite's shared `StaticPool` connection. Compared
+against `claim_next_job`'s already-proven pattern, which uses
+`db.commit()` unconditionally (an UPDATE matching zero rows makes no
+changes, so committing it is always safe) - and never rollback.
+Switched to match. This was caught by writing genuinely concurrent
+tests immediately, not by shipping first and finding out later.
+
+**A third finding, also from writing these tests:** the EXISTING
+`test_concurrent_workers_racing_for_the_same_job_only_one_wins` (the
+one proving the outbox pattern correct) was itself not testing what it
+claimed - `t1.start(); t1.join()` before `t2.start()` is fully
+sequential, not concurrent, regardless of using two `Thread` objects.
+The review flagged this by name. Fixed with a real `threading.Barrier`
+forcing both threads to actually reach their claim attempt at the same
+instant.
+
+**Genuine, repeatable flakiness found and handled honestly, not hidden:**
+the new ticket/message race tests are intermittently flaky ON SQLITE
+SPECIFICALLY - confirmed by running them repeatedly and seeing
+different, sometimes impossible-looking outcomes (both threads losing
+the same race). Root cause: SQLite's `StaticPool` shares ONE physical
+connection across "separate" test sessions, and `check_same_thread=False`
+(needed elsewhere for `TestClient`'s own threading) does not make
+truly concurrent access to that one connection from two real OS
+threads well-defined at the C library level. This is a property of the
+TEST INFRASTRUCTURE's database choice, not of `crud.py`'s correctness
+- confirmed by running the exact same tests repeatedly against real
+Postgres (5 consecutive clean runs) with zero failures. Rather than
+leave a test that fails unpredictably for reasons unrelated to the
+code under test, these are explicitly skipped on SQLite
+(`tests/test_concurrency_races.py`'s own `pytestmark`) and run for
+real in CI's existing Postgres job.
+
+### Test suite
+
+```
+$ python -m pytest -q                                    # SQLite
+170 passed, 4 skipped
+$ TEST_DATABASE_URL=postgresql://... python -m pytest -q  # Postgres
+174 passed
+```
+
+9 new tests total: 5 in `tests/test_auth.py` (the P0 fix), 4 in the new
+`tests/test_concurrency_races.py` (the P1 fix, Postgres-only by
+design). Plus one existing test rewritten (its entire purpose was
+asserting now-fixed-wrong behavior) and 25 existing tests updated for
+the auth change.
+
+### What from the review is NOT yet addressed - stated plainly, not implied
+
+This review found substantially more than these two issues. Fixed:
+the P0 auth gap and the P1 ticket/message concurrency race, both
+verified against real Postgres. **Not yet fixed:** the P1 worker-lease
+double-claim/stale-completion findings (claim_next_job's eligibility
+conditions, lease tokens, attempt-limit propagation from Settings -
+partially related to what was just fixed, not the same issue); the
+P1/P2 parent-resource relationship checks (message/ticket, call/
+customer mismatches); the P2 open-redirect on login; the P2 browser
+input-validation and session/invite-token-hashing gaps; the P2 rate-
+limiting/CSP/trusted-host deployment hardening; the P1 telephony-as-
+real-conversation-workflow gap; the P2 RAG confidence/versioning
+findings; and the P2 operational-scale items (the ~1,000-line main.py/
+crud.py modules, N+1-shaped queries, explicit seeding). The review's
+own six-week sequence is a reasonable prioritization for tackling the
+rest.
