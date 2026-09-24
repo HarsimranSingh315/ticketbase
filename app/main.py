@@ -881,7 +881,7 @@ def ui_approve_message(
     authenticated, version-checked call happening first.
     """
     try:
-        message = crud.approve_message(db, message_id, actor_user_id=user.id, expected_version=version)
+        message = crud.approve_message(db, message_id, actor_user_id=user.id, expected_version=version, max_attempts=settings.outbox_max_attempts)
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
     except crud.MessageNotDraft:

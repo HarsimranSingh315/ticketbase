@@ -299,6 +299,23 @@ class OutboxJob(Base):
 
     leased_by = Column(String, nullable=True)
     leased_until = Column(DateTime, nullable=True)
+    # A fresh random token assigned on every successful claim (first
+    # claim AND every reclaim of an expired lease) - NOT the same value
+    # as `status`, which is exactly the problem this column fixes. A
+    # reclaim's compare-and-swap has to distinguish "this specific
+    # lease generation" from "a job that happens to currently read as
+    # claimed" - `status` alone can't do that, because reclaiming an
+    # expired lease sets status to the SAME value it already had
+    # ('claimed' -> 'claimed'), so two concurrent reclaimers could both
+    # match a WHERE clause that only checks status. lease_token changes
+    # on every claim, so it uniquely pins one lease generation - see
+    # crud.claim_next_job. complete_job/fail_job require the caller's
+    # remembered token to still match this column before changing
+    # anything, so a stale worker (its lease already expired and
+    # reclaimed by someone else) can never overwrite a newer worker's
+    # result - found and fixed after an external review named this
+    # exact class of bug.
+    lease_token = Column(String, nullable=True)
     next_attempt_at = Column(DateTime, nullable=False, default=_utcnow)
 
     provider_message_id = Column(String, nullable=True)

@@ -278,14 +278,14 @@ def test_failed_send_retries_with_backoff_then_becomes_terminal(db_session):
     # First failure: attempts=1 (< max_attempts=2) -> stays pending, retried later.
     claimed = crud.claim_next_job(db_session, "worker-1", lease_seconds=60)
     assert claimed is not None
-    crud.fail_job(db_session, claimed.id, "simulated failure 1", backoff_seconds=0)
+    crud.fail_job(db_session, claimed.id, claimed.lease_token, "simulated failure 1", backoff_seconds=0)
     job_after_1 = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
     assert job_after_1.status == OutboxJobStatus.pending
 
     # Second failure: attempts=2 (>= max_attempts=2) -> terminally failed.
     claimed2 = crud.claim_next_job(db_session, "worker-1", lease_seconds=60)
     assert claimed2 is not None
-    crud.fail_job(db_session, claimed2.id, "simulated failure 2", backoff_seconds=0)
+    crud.fail_job(db_session, claimed2.id, claimed2.lease_token, "simulated failure 2", backoff_seconds=0)
     job_after_2 = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
     assert job_after_2.status == OutboxJobStatus.failed
 
@@ -365,3 +365,179 @@ def test_concurrent_workers_racing_for_the_same_job_only_one_wins(db_session):
     final_job = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
     assert final_job.status == OutboxJobStatus.claimed
     assert final_job.attempts == 1  # NOT 2 - the loser must not have incremented it
+
+
+def test_stale_completion_after_lease_reclaim_is_safely_ignored(db_session):
+    """
+    The exact scenario an external review named: "stale workers can
+    overwrite results." Simulates a worker whose lease expired mid-send
+    (network was just slow) - another worker reclaims and completes the
+    job first. When the ORIGINAL worker's slow completion finally
+    arrives, using its now-stale lease_token, it must be ignored, not
+    allowed to un-sent a message that's already correctly marked sent.
+    """
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, OutboxJobStatus, User, UserRole
+    from app.security import hash_password
+
+    user = User(email="stale1@example.com", name="Stale1", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user)
+    db_session.commit()
+    ticket = crud.create_ticket(db_session, "test")
+    message = OutboundMessage(
+        ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+        created_by_user_id=user.id, status=MessageStatus.approved,
+        approved_by_user_id=user.id, approved_recipient_email="x@example.com",
+        approved_subject="x", approved_body="x",
+    )
+    db_session.add(message)
+    db_session.commit()
+    job = OutboxJob(operation_key=f"message-{message.id}", message_id=message.id)
+    db_session.add(job)
+    db_session.commit()
+
+    # Worker A claims it (its lease will be this token).
+    claimed_by_a = crud.claim_next_job(db_session, "worker-A", lease_seconds=60)
+    stale_token = claimed_by_a.lease_token
+
+    # Simulate A's lease expiring (backdate it) before A ever calls
+    # complete_job - e.g. a slow network call that outlives the lease.
+    claimed_by_a.leased_until = crud._utcnow() - __import__("datetime").timedelta(seconds=1)
+    db_session.commit()
+
+    # Worker B reclaims the expired lease and completes it correctly.
+    claimed_by_b = crud.claim_next_job(db_session, "worker-B", lease_seconds=60)
+    assert claimed_by_b is not None
+    assert claimed_by_b.lease_token != stale_token
+    crud.complete_job(db_session, claimed_by_b.id, claimed_by_b.lease_token, "real-provider-id-from-b")
+
+    # Now A's slow completion finally arrives, with its STALE token.
+    crud.complete_job(db_session, job.id, stale_token, "stale-provider-id-from-a")
+
+    # B's result must stand - A's stale completion must not have overwritten it.
+    final = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
+    assert final.status == OutboxJobStatus.sent
+    assert final.provider_message_id == "real-provider-id-from-b"
+
+
+def test_stale_failure_after_lease_reclaim_is_safely_ignored(db_session):
+    """The mirror case: a stale FAILURE report must not revert a job
+    another worker has already completed."""
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, OutboxJobStatus, User, UserRole
+    from app.security import hash_password
+
+    user = User(email="stale2@example.com", name="Stale2", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user)
+    db_session.commit()
+    ticket = crud.create_ticket(db_session, "test")
+    message = OutboundMessage(
+        ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+        created_by_user_id=user.id, status=MessageStatus.approved,
+        approved_by_user_id=user.id, approved_recipient_email="x@example.com",
+        approved_subject="x", approved_body="x",
+    )
+    db_session.add(message)
+    db_session.commit()
+    job = OutboxJob(operation_key=f"message-{message.id}", message_id=message.id)
+    db_session.add(job)
+    db_session.commit()
+
+    claimed_by_a = crud.claim_next_job(db_session, "worker-A", lease_seconds=60)
+    stale_token = claimed_by_a.lease_token
+    claimed_by_a.leased_until = crud._utcnow() - __import__("datetime").timedelta(seconds=1)
+    db_session.commit()
+
+    claimed_by_b = crud.claim_next_job(db_session, "worker-B", lease_seconds=60)
+    crud.complete_job(db_session, claimed_by_b.id, claimed_by_b.lease_token, "real-provider-id")
+
+    # A's stale FAILURE report arrives after B already succeeded.
+    crud.fail_job(db_session, job.id, stale_token, "stale failure from A", backoff_seconds=0)
+
+    final = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
+    assert final.status == OutboxJobStatus.sent  # must NOT have been reverted to pending/failed
+    assert final.provider_message_id == "real-provider-id"
+
+
+def test_repeated_crashes_cannot_reclaim_past_max_attempts(db_session):
+    """
+    Before this fix, the attempt ceiling was only enforced inside
+    fail_job - a worker that crashed BEFORE reaching fail_job (the
+    realistic crash case) left the job re-claimable forever, each
+    reclaim incrementing attempts with no upper bound actually
+    enforced. Simulates three crashes in a row on a job with
+    max_attempts=2: the job must end up terminally failed, not
+    endlessly reclaimable.
+    """
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, OutboxJobStatus, User, UserRole
+    from app.security import hash_password
+    import datetime
+
+    user = User(email="crash1@example.com", name="Crash1", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user)
+    db_session.commit()
+    ticket = crud.create_ticket(db_session, "test")
+    message = OutboundMessage(
+        ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+        created_by_user_id=user.id, status=MessageStatus.approved,
+        approved_by_user_id=user.id, approved_recipient_email="x@example.com",
+        approved_subject="x", approved_body="x",
+    )
+    db_session.add(message)
+    db_session.commit()
+    job = OutboxJob(operation_key=f"message-{message.id}", message_id=message.id, max_attempts=2)
+    db_session.add(job)
+    db_session.commit()
+
+    # Crash 1: claim, then simulate a crash (never calls complete/fail_job) - just expire the lease.
+    claimed1 = crud.claim_next_job(db_session, "worker-1", lease_seconds=60)
+    assert claimed1.attempts == 1
+    claimed1.leased_until = crud._utcnow() - datetime.timedelta(seconds=1)
+    db_session.commit()
+
+    # Crash 2: another worker reclaims (attempts now 2 == max_attempts), also "crashes".
+    claimed2 = crud.claim_next_job(db_session, "worker-2", lease_seconds=60)
+    assert claimed2 is not None
+    assert claimed2.attempts == 2
+    claimed2.leased_until = crud._utcnow() - datetime.timedelta(seconds=1)
+    db_session.commit()
+
+    # A third claim attempt must NOT reclaim it - it's now at its ceiling.
+    # claim_next_job's own upfront pass should have already terminally
+    # failed it instead.
+    claimed3 = crud.claim_next_job(db_session, "worker-3", lease_seconds=60)
+    assert claimed3 is None or claimed3.id != job.id
+
+    final = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
+    assert final.status == OutboxJobStatus.failed
+    assert final.attempts == 2  # not incremented a third time
+
+    final_message = crud.get_message(db_session, message.id)
+    assert final_message.status.value == "failed"
+
+
+def test_approve_message_propagates_configured_max_attempts(db_session):
+    """Before this fix, approve_message always used the OutboxJob
+    model's default (5), ignoring whatever OUTBOX_MAX_ATTEMPTS was
+    actually configured to. Verifies the setting genuinely reaches the
+    created row now."""
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, User, UserRole
+    from app.security import hash_password
+
+    user = User(email="maxattempts@example.com", name="MaxAttempts", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user)
+    db_session.commit()
+    ticket = crud.create_ticket(db_session, "test")
+    message = OutboundMessage(
+        ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+        created_by_user_id=user.id, status=MessageStatus.draft,
+    )
+    db_session.add(message)
+    db_session.commit()
+
+    crud.approve_message(db_session, message.id, actor_user_id=user.id, expected_version=message.version, max_attempts=9)
+
+    job = db_session.query(OutboxJob).filter(OutboxJob.message_id == message.id).first()
+    assert job.max_attempts == 9

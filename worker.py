@@ -70,7 +70,7 @@ def run_one_cycle(worker_id: str) -> bool:
             # must never crash on unexpected state - fail the job
             # loudly instead.
             logger.error("job %s references missing message %s", job.id, job.message_id)
-            crud.fail_job(db, job.id, "referenced message no longer exists", backoff_seconds=0)
+            crud.fail_job(db, job.id, job.lease_token, "referenced message no longer exists", backoff_seconds=0)
             return True
 
         adapter = get_mail_adapter(settings, db)
@@ -87,7 +87,7 @@ def run_one_cycle(worker_id: str) -> bool:
         )
 
         if result.success:
-            crud.complete_job(db, job.id, result.provider_message_id)
+            crud.complete_job(db, job.id, job.lease_token, result.provider_message_id)
             logger.info(
                 "sent message %s (job %s) to %s, provider_id=%s",
                 message.id, job.id, message.approved_recipient_email, result.provider_message_id,
@@ -96,7 +96,7 @@ def run_one_cycle(worker_id: str) -> bool:
             # Simple exponential backoff, capped - attempts is already
             # incremented by claim_next_job at claim time.
             backoff = min(2 ** job.attempts, 300)
-            crud.fail_job(db, job.id, result.error or "unknown error", backoff_seconds=backoff)
+            crud.fail_job(db, job.id, job.lease_token, result.error or "unknown error", backoff_seconds=backoff)
             logger.warning(
                 "send failed for message %s (job %s), attempt %d/%d: %s",
                 message.id, job.id, job.attempts, job.max_attempts, result.error,

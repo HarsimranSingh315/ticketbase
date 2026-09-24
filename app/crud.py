@@ -591,7 +591,7 @@ def update_draft(db: Session, message_id: int, recipient_email: str, subject: st
     )
 
 
-def approve_message(db: Session, message_id: int, actor_user_id: int, expected_version: int) -> Optional[OutboundMessage]:
+def approve_message(db: Session, message_id: int, actor_user_id: int, expected_version: int, max_attempts: Optional[int] = None) -> Optional[OutboundMessage]:
     """
     THE core transactional-outbox operation. Takes an immutable
     snapshot of the exact recipient/subject/body being approved, AND
@@ -613,6 +613,15 @@ def approve_message(db: Session, message_id: int, actor_user_id: int, expected_v
     guaranteed to reflect exactly what the row held at the instant this
     UPDATE's WHERE clause matched, which is the actual point of an
     "immutable approved snapshot" in the first place.
+
+    `max_attempts`: pass `settings.outbox_max_attempts` from the caller
+    - left optional (falls back to the model's own default of 5) only
+    so existing direct callers (tests) don't break, not because
+    skipping it is fine for a real deployment. An earlier version
+    always used the model default regardless of what was actually
+    configured - a real, if quiet, gap: a deployment that set
+    OUTBOX_MAX_ATTEMPTS to something other than 5 had that setting
+    silently ignored for every job.
     """
     now = _utcnow()
     result = db.execute(
@@ -646,6 +655,7 @@ def approve_message(db: Session, message_id: int, actor_user_id: int, expected_v
         message_id=message_id,
         status=OutboxJobStatus.pending,
         next_attempt_at=now,
+        **({"max_attempts": max_attempts} if max_attempts is not None else {}),
     )
     db.add(job)
 
@@ -673,26 +683,84 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[
     """
     Atomically claims one job: either genuinely pending-and-due, or
     claimed-by-a-worker-whose-lease-expired (crash recovery - a worker
-    that died mid-job leaves it claimed forever otherwise). Uses a
-    compare-and-swap UPDATE ... WHERE status=<the status we just read>
-    pattern rather than SELECT ... FOR UPDATE SKIP LOCKED, specifically
-    so this works unchanged on SQLite (tests, local dev) as well as
-    Postgres - the WHERE-matches-old-status UPDATE is atomic at the
-    single-row level on both, which is all the correctness this needs.
-    Verified directly with two concurrent DB sessions racing for the
-    same job - see tests/test_outbox.py.
+    that died mid-job leaves it claimed forever otherwise).
+
+    Two real bugs here, found by an external review and independently
+    confirmed by tracing the code, fixed together:
+
+    1. The compare-and-swap for a FRESH claim (`WHERE status='pending'`)
+       was already correct - a fresh claim genuinely changes status
+       from 'pending' to 'claimed'. But the RECLAIM case set status to
+       the SAME value it already had ('claimed' -> 'claimed'), so a
+       WHERE clause checking only status couldn't tell "this specific
+       expired lease" from "a lease someone else already reclaimed a
+       moment ago" - two concurrent reclaimers could both match. Fixed
+       by also requiring `lease_token` to match the exact value read
+       for THIS lease generation (see OutboxJob.lease_token's
+       docstring) - a fresh, unique token is assigned on every
+       successful claim, so this genuinely pins one generation.
+    2. Nothing enforced the attempt ceiling AT CLAIM TIME - only
+       fail_job did, which a crashed worker never reaches. A job that
+       kept crashing its worker could be reclaimed forever, each
+       reclaim incrementing attempts with no upper bound ever actually
+       enforced. Fixed with an upfront pass that terminally fails any
+       expired-claimed job already at its limit (the crash meant
+       nothing else would ever notice), and by excluding
+       already-at-limit jobs from being reclaimed as work in the first
+       place.
     """
     from sqlalchemy import or_, and_
 
     now = _utcnow()
     lease_until = now + timedelta(seconds=lease_seconds)
 
+    # Pass 1: terminally fail expired-claimed jobs already at their
+    # attempt ceiling - a real atomic UPDATE, not a read-then-write, so
+    # two workers doing this pass at the same moment can't double-apply
+    # it (harmless if they did - both would set the same terminal
+    # state). Must ALSO fail the associated message, in the SAME
+    # transaction - caught by testing this specific path directly: an
+    # earlier version updated only the OutboxJob row, leaving the
+    # OutboundMessage stuck at `approved` forever even though its send
+    # had genuinely, terminally failed.
+    stuck_job_rows = (
+        db.query(OutboxJob.id, OutboxJob.message_id)
+        .filter(
+            OutboxJob.status == OutboxJobStatus.claimed,
+            OutboxJob.leased_until < now,
+            OutboxJob.attempts >= OutboxJob.max_attempts,
+        )
+        .all()
+    )
+    if stuck_job_rows:
+        stuck_job_ids = [row.id for row in stuck_job_rows]
+        stuck_message_ids = [row.message_id for row in stuck_job_rows]
+        db.execute(
+            sa_update(OutboxJob)
+            .where(OutboxJob.id.in_(stuck_job_ids))
+            .values(
+                status=OutboxJobStatus.failed,
+                last_error="Worker crashed repeatedly and exceeded max_attempts on lease expiry (never reached a normal failed-send path).",
+                updated_at=now,
+            )
+        )
+        db.execute(
+            sa_update(OutboundMessage)
+            .where(OutboundMessage.id.in_(stuck_message_ids))
+            .values(status=MessageStatus.failed)
+        )
+        db.commit()
+
     candidate = (
         db.query(OutboxJob)
         .filter(
             or_(
                 and_(OutboxJob.status == OutboxJobStatus.pending, OutboxJob.next_attempt_at <= now),
-                and_(OutboxJob.status == OutboxJobStatus.claimed, OutboxJob.leased_until < now),
+                and_(
+                    OutboxJob.status == OutboxJobStatus.claimed,
+                    OutboxJob.leased_until < now,
+                    OutboxJob.attempts < OutboxJob.max_attempts,
+                ),
             )
         )
         .order_by(OutboxJob.next_attempt_at.asc())
@@ -701,15 +769,31 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[
     if candidate is None:
         return None
 
-    previous_status = candidate.status
+    new_token = generate_token()
+    if candidate.status == OutboxJobStatus.pending:
+        where_clause = (OutboxJob.id == candidate.id, OutboxJob.status == OutboxJobStatus.pending)
+    else:
+        # Reclaim: pin the EXACT lease generation we just read, via its
+        # own current lease_token - status alone can't distinguish this
+        # from a fresher reclaim (see this function's docstring).
+        # SQLAlchemy compiles `== None` to `IS NULL` automatically, so
+        # this is correct even for a job claimed before this column
+        # existed (lease_token still NULL from an old row).
+        where_clause = (
+            OutboxJob.id == candidate.id,
+            OutboxJob.status == OutboxJobStatus.claimed,
+            OutboxJob.lease_token == candidate.lease_token,
+        )
+
     updated_rows = (
         db.query(OutboxJob)
-        .filter(OutboxJob.id == candidate.id, OutboxJob.status == previous_status)
+        .filter(*where_clause)
         .update(
             {
                 "status": OutboxJobStatus.claimed,
                 "leased_by": worker_id,
                 "leased_until": lease_until,
+                "lease_token": new_token,
                 "attempts": OutboxJob.attempts + 1,
                 "updated_at": now,
             },
@@ -718,55 +802,85 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[
     )
     db.commit()
     if updated_rows == 0:
-        # Someone else claimed it between our SELECT and our UPDATE -
-        # not an error, just a lost race. The caller should try again
-        # for a different job.
+        # Someone else claimed (or reclaimed) it between our SELECT and
+        # our UPDATE - not an error, just a lost race. The caller
+        # should try again for a different job.
         return None
 
     db.refresh(candidate)
     return candidate
 
 
-def complete_job(db: Session, job_id: int, provider_message_id: Optional[str]) -> None:
-    """Marks a job (and its message) as successfully sent. Called by
-    the worker after a successful adapter.send()."""
-    job = db.query(OutboxJob).filter(OutboxJob.id == job_id).first()
-    if job is None:
+def complete_job(db: Session, job_id: int, lease_token: str, provider_message_id: Optional[str]) -> None:
+    """
+    Marks a job (and its message) as successfully sent. Called by the
+    worker after a successful adapter.send(). Requires the caller's
+    remembered `lease_token` to still match - if it doesn't (the lease
+    expired and was reclaimed by another worker since this one started
+    its send attempt), this is a STALE completion from a worker that's
+    no longer the active owner, and is safely ignored rather than
+    allowed to overwrite whatever the current, active worker is doing
+    (or has already done). Found and fixed after an external review
+    named this exact scenario: "stale workers can overwrite results."
+    """
+    result = db.execute(
+        sa_update(OutboxJob)
+        .where(OutboxJob.id == job_id, OutboxJob.lease_token == lease_token, OutboxJob.status == OutboxJobStatus.claimed)
+        .values(status=OutboxJobStatus.sent, provider_message_id=provider_message_id, updated_at=_utcnow())
+    )
+    if result.rowcount == 0:
+        db.commit()  # commit, not rollback, even on this no-op path - see claim_next_job's reasoning; matters, not just style
         return
-    job.status = OutboxJobStatus.sent
-    job.provider_message_id = provider_message_id
-    job.updated_at = _utcnow()
 
+    job = db.query(OutboxJob).filter(OutboxJob.id == job_id).first()
     message = get_message(db, job.message_id)
     if message is not None:
         message.status = MessageStatus.sent
-
     db.commit()
 
 
-def fail_job(db: Session, job_id: int, error: str, backoff_seconds: int) -> None:
+def fail_job(db: Session, job_id: int, lease_token: str, error: str, backoff_seconds: int) -> None:
     """
     Records a failed send attempt. If attempts have reached
     max_attempts, the job becomes terminally `failed` (and the message
     too) - a bounded retry policy, not infinite retries. Otherwise it's
     rescheduled with the given backoff and left `pending` for another
     worker (or the same one, later) to pick up again.
+
+    Same stale-completion protection as complete_job: requires the
+    caller's `lease_token` to still be the active one, or the failure
+    report is safely ignored rather than allowed to revert a job
+    another worker has since moved on from (possibly already sent).
     """
-    job = db.query(OutboxJob).filter(OutboxJob.id == job_id).first()
+    job = (
+        db.query(OutboxJob)
+        .filter(OutboxJob.id == job_id, OutboxJob.lease_token == lease_token, OutboxJob.status == OutboxJobStatus.claimed)
+        .first()
+    )
     if job is None:
+        db.commit()
         return
-    job.last_error = error[:2000]
-    job.updated_at = _utcnow()
 
     if job.attempts >= job.max_attempts:
-        job.status = OutboxJobStatus.failed
+        new_status = OutboxJobStatus.failed
+        new_next_attempt_at = job.next_attempt_at
+    else:
+        new_status = OutboxJobStatus.pending
+        new_next_attempt_at = _utcnow() + timedelta(seconds=backoff_seconds)
+
+    result = db.execute(
+        sa_update(OutboxJob)
+        .where(OutboxJob.id == job_id, OutboxJob.lease_token == lease_token, OutboxJob.status == OutboxJobStatus.claimed)
+        .values(status=new_status, last_error=error[:2000], next_attempt_at=new_next_attempt_at, updated_at=_utcnow())
+    )
+    if result.rowcount == 0:
+        db.commit()
+        return
+
+    if new_status == OutboxJobStatus.failed:
         message = get_message(db, job.message_id)
         if message is not None:
             message.status = MessageStatus.failed
-    else:
-        job.status = OutboxJobStatus.pending
-        job.next_attempt_at = _utcnow() + timedelta(seconds=backoff_seconds)
-
     db.commit()
 
 

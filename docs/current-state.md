@@ -1302,3 +1302,92 @@ findings; and the P2 operational-scale items (the ~1,000-line main.py/
 crud.py modules, N+1-shaped queries, explicit seeding). The review's
 own six-week sequence is a reasonable prioritization for tackling the
 rest.
+
+---
+
+## Second P1 from the review: worker lease reclaiming had a real double-claim bug
+
+Verified by tracing the exact code before touching anything, and it
+was worse on inspection than the summary suggested. Four distinct sub-
+findings, all confirmed real:
+
+1. **Reclaiming an expired lease sets `status` to the SAME value it
+   already had** (`claimed` -> `claimed`), so `claim_next_job`'s
+   compare-and-swap - correct for a FRESH claim (`pending` ->
+   `claimed`, a real status change) - could not distinguish "this
+   specific expired lease" from "a lease someone else already
+   reclaimed a moment ago" for a RECLAIM. Two concurrent reclaimers
+   could both match and both think they won.
+2. **`complete_job`/`fail_job` checked neither lease ownership nor a
+   lease generation** - just `job_id` - so a worker whose lease expired
+   mid-send (e.g. a slow network call) could have its stale
+   completion/failure silently overwrite whatever a worker that
+   correctly reclaimed the job afterward had already done.
+3. **The attempt ceiling was only enforced inside `fail_job`**, which a
+   crashed worker never reaches. A job that kept crashing its worker
+   could be reclaimed forever, each reclaim incrementing `attempts`
+   with no upper bound ever actually checked.
+4. **`OUTBOX_MAX_ATTEMPTS` was declared in `Settings` but never used** -
+   `approve_message` always created jobs with the `OutboxJob` model's
+   hardcoded default (5), silently ignoring whatever was actually
+   configured.
+
+### Fix
+
+Added `OutboxJob.lease_token` (migration `e38103fdb554`) - a fresh
+random token assigned on every successful claim, first-claim and
+reclaim alike. `claim_next_job`'s reclaim branch now requires the
+CURRENT `lease_token` to match the exact value read for that lease
+generation, not just `status` - genuinely distinguishing one lease
+generation from the next. `complete_job`/`fail_job` now require the
+caller's remembered token to still match before changing anything; a
+mismatch means the lease was reclaimed since, and the call is safely
+ignored rather than allowed to overwrite the active worker's result.
+`claim_next_job` also runs an upfront pass that terminally fails any
+expired-claimed job already at its attempt ceiling (closing the
+crash-forever-reclaimable gap) and excludes already-at-ceiling jobs
+from being claimed as work at all. `approve_message` now takes an
+optional `max_attempts` and `main.py`'s route passes
+`settings.outbox_max_attempts` through it.
+
+### A real bug found by testing the fix, not before shipping it
+
+The first version of the attempt-ceiling pass updated only the
+`OutboxJob` row's status to `failed`, not the associated
+`OutboundMessage` - found immediately by writing a test for exactly
+this path (`test_repeated_crashes_cannot_reclaim_past_max_attempts`),
+which failed with the message stuck at `approved` forever even though
+its job had genuinely, terminally failed. Fixed to update both in the
+same transaction, using a two-step "collect affected IDs, then bulk-
+update both tables" approach rather than a single blind UPDATE, since
+the message table isn't reachable from a single `OutboxJob`-scoped
+statement.
+
+### Test suite
+
+9 new tests: `test_stale_completion_after_lease_reclaim_is_safely_ignored`,
+`test_stale_failure_after_lease_reclaim_is_safely_ignored`,
+`test_repeated_crashes_cannot_reclaim_past_max_attempts`, and
+`test_approve_message_propagates_configured_max_attempts` (all
+sequential/simulated, no real threading needed - `tests/test_outbox.py`),
+plus `test_two_workers_racing_to_reclaim_the_same_expired_lease_only_one_wins`
+(genuine `threading.Barrier` race on two real Postgres connections -
+THE scenario that was actually broken before this fix - verified
+stable across 5 consecutive runs, `tests/test_concurrency_races.py`,
+Postgres-only for the same reason as the other tests in that file).
+
+```
+$ python -m pytest -q                                     # SQLite
+174 passed, 5 skipped
+$ TEST_DATABASE_URL=postgresql://... python -m pytest -q  # Postgres
+179 passed
+```
+
+### What from the review is still NOT addressed
+
+Both P1 findings involving genuine data-race correctness are now
+fixed and verified against real Postgres. Still open: the P1/P2
+parent-resource relationship checks, the P2 open-redirect, browser
+input-validation gaps, rate-limiting/CSP deployment hardening, the P1
+telephony-as-real-conversation-workflow gap, the P2 RAG confidence/
+versioning findings, and the operational-scale items.

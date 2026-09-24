@@ -288,3 +288,78 @@ def test_two_sessions_racing_to_approve_the_same_message_only_one_job_created(db
     db_session.expire_all()
     jobs = db_session.query(OutboxJob).filter(OutboxJob.message_id == message_id).all()
     assert len(jobs) == 1, f"expected exactly one outbox job, got {len(jobs)}"
+
+
+def test_two_workers_racing_to_reclaim_the_same_expired_lease_only_one_wins(db_session):
+    """
+    THE scenario this whole lease-token fix exists for: reclaiming an
+    expired lease sets status to the SAME value it already had
+    ('claimed' -> 'claimed'), so a compare-and-swap that only checks
+    status cannot tell "this specific expired lease" from "a lease
+    someone else already reclaimed a moment ago." Before the
+    lease_token fix, two workers racing to reclaim the same expired
+    lease could BOTH win. Verified here with a genuine threading.Barrier
+    race on two real, separate Postgres connections - not simulated
+    sequentially.
+    """
+    import datetime
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, OutboxJobStatus, User, UserRole
+    from tests.conftest import TestSessionLocal
+
+    user = User(email="reclaim-race@example.com", name="Reclaim Race", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user)
+    db_session.commit()
+    ticket = crud.create_ticket(db_session, "test")
+    message = OutboundMessage(
+        ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+        created_by_user_id=user.id, status=MessageStatus.approved,
+        approved_by_user_id=user.id, approved_recipient_email="x@example.com",
+        approved_subject="x", approved_body="x",
+    )
+    db_session.add(message)
+    db_session.commit()
+    job = OutboxJob(operation_key=f"message-{message.id}", message_id=message.id)
+    db_session.add(job)
+    db_session.commit()
+
+    # First claim it normally, then backdate the lease to simulate a
+    # crashed worker whose lease has genuinely expired.
+    first_claim = crud.claim_next_job(db_session, "original-worker", lease_seconds=60)
+    assert first_claim is not None
+    db_session.execute(
+        __import__("sqlalchemy").update(OutboxJob).where(OutboxJob.id == job.id).values(
+            leased_until=crud._utcnow() - datetime.timedelta(seconds=1)
+        )
+    )
+    db_session.commit()
+
+    barrier = threading.Barrier(2)
+    results = []
+    results_lock = threading.Lock()
+
+    def reclaim(worker_id):
+        session = TestSessionLocal()
+        try:
+            barrier.wait()
+            claimed = crud.claim_next_job(session, worker_id, lease_seconds=60)
+            with results_lock:
+                results.append((worker_id, claimed.id if claimed else None))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=reclaim, args=("worker-C",))
+    t2 = threading.Thread(target=reclaim, args=("worker-D",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    winners = [r for r in results if r[1] is not None]
+    assert len(winners) == 1, f"expected exactly one winner reclaiming the expired lease, got {results}"
+
+    db_session.expire_all()
+    final_job = db_session.query(OutboxJob).filter(OutboxJob.id == job.id).first()
+    assert final_job.status == OutboxJobStatus.claimed
+    assert final_job.attempts == 2  # original claim (1) + exactly one successful reclaim (2) - never 3
+    assert final_job.leased_by == winners[0][0]
