@@ -43,6 +43,7 @@ from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base
 from app.telephony import validate_twilio_signature, get_call_adapter
 from app.security import generate_token
+from app.validation import ValidationError
 
 settings = get_settings()
 
@@ -75,10 +76,14 @@ def _bootstrap_admin_if_needed(db: Session) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Dev-friendly auto-create. Production deployments should instead
-    # run `alembic upgrade head` before starting the app - this
-    # create_all is a no-op against a DB that's already migrated.
-    Base.metadata.create_all(bind=engine)
+    # Schema auto-create is a development convenience only. In strict
+    # environments the schema must come exclusively from Alembic (run as
+    # the Render pre-deploy step) - create_all there could silently
+    # create tables that no migration knows about, masking a missed
+    # migration until it fails in a confusing way later.
+    from app.config import STRICT_ENVIRONMENTS
+    if settings.environment not in STRICT_ENVIRONMENTS:
+        Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:
@@ -161,6 +166,14 @@ templates = Jinja2Templates(directory="app/templates", context_processors=[_glob
 @app.exception_handler(AuthRedirect)
 async def auth_redirect_handler(request: Request, exc: AuthRedirect):
     return RedirectResponse(url=f"/login?next={exc.next_path}", status_code=303)
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError):
+    """Any input problem that reaches CRUD without a route-specific
+    handler becomes a 422 with the field named - never a 500."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=422, content={"detail": exc.message, "field": exc.field})
 
 
 @app.exception_handler(Exception)
@@ -411,6 +424,25 @@ async def twilio_status_webhook(request: Request, db: Session = Depends(get_db),
 PRELOGIN_CSRF_COOKIE_NAME = "prelogin_csrf"
 
 
+def _set_auth_cookie(response, name: str, value: str, max_age: int) -> None:
+    """Every auth-related cookie is set through here so attributes can't
+    drift between call sites. Secure comes from settings, which strict
+    environments force to True (config.validate_settings) - the
+    pre-login cookie previously never set Secure at all."""
+    response.set_cookie(
+        name, value, max_age=max_age, path="/",
+        httponly=True, samesite="lax", secure=get_settings().session_cookie_secure,
+    )
+
+
+def _delete_auth_cookie(response, name: str) -> None:
+    """Deletion must repeat path/secure/samesite, or some browsers treat
+    it as a different cookie and keep the original."""
+    response.delete_cookie(
+        name, path="/", httponly=True, samesite="lax", secure=get_settings().session_cookie_secure,
+    )
+
+
 @app.get("/login")
 def login_form(request: Request, next: Optional[str] = None):
     """
@@ -433,7 +465,7 @@ def login_form(request: Request, next: Optional[str] = None):
         # Not set httponly=False for JS access - the token is embedded
         # server-side into the rendered form directly, so the cookie
         # never needs to be read by client-side script at all.
-        response.set_cookie(PRELOGIN_CSRF_COOKIE_NAME, prelogin_token, httponly=True, samesite="lax", max_age=3600)
+        _set_auth_cookie(response, PRELOGIN_CSRF_COOKIE_NAME, prelogin_token, max_age=3600)
     return response
 
 
@@ -488,12 +520,8 @@ def login_submit(
     raw_token, session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
     safe_next = next if _is_safe_redirect_path(next) else "/"
     response = RedirectResponse(url=safe_next, status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE_NAME, raw_token,
-        httponly=True, samesite="lax", secure=settings.session_cookie_secure,
-        max_age=settings.session_ttl_hours * 3600,
-    )
-    response.delete_cookie(PRELOGIN_CSRF_COOKIE_NAME)
+    _set_auth_cookie(response, SESSION_COOKIE_NAME, raw_token, max_age=settings.session_ttl_hours * 3600)
+    _delete_auth_cookie(response, PRELOGIN_CSRF_COOKIE_NAME)
     return response
 
 
@@ -509,7 +537,7 @@ def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(
         raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Reload the page and try again.")
     crud.revoke_session(db, session_id)
     response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie(SESSION_COOKIE_NAME)
+    _delete_auth_cookie(response, SESSION_COOKIE_NAME)
     return response
 
 
@@ -593,11 +621,7 @@ def accept_invite_submit(
     crud.mark_invite_used(db, invite)
     raw_token, session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
     response = RedirectResponse(url="/", status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE_NAME, raw_token,
-        httponly=True, samesite="lax", secure=settings.session_cookie_secure,
-        max_age=settings.session_ttl_hours * 3600,
-    )
+    _set_auth_cookie(response, SESSION_COOKIE_NAME, raw_token, max_age=settings.session_ttl_hours * 3600)
     return response
 
 
@@ -761,14 +785,24 @@ def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: R
     never skipped in this project even when the new feature's own
     tests all pass on their own.
     """
+    return _render_ticket_error(
+        request, db, ticket_id, rag_index, user, settings,
+        "This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
+        status_code=409,
+    )
+
+
+def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User,
+                         settings: Settings, message: str, status_code: int = 422):
+    """Re-renders the ticket page with a visible error instead of a bare
+    error response, so the agent stays in context."""
     ticket = crud.get_ticket(db, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
-    context = _ticket_detail_context(
-        db, ticket, related, user, request, settings,
-        conflict_error="This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
-    )
-    return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=409)
+    context = _ticket_detail_context(db, ticket, related, user, request, settings, conflict_error=message)
+    return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=status_code)
 
 
 @app.post("/ui/tickets/{ticket_id}/status", dependencies=[Depends(require_csrf)])
@@ -779,6 +813,8 @@ def ui_update_status(
 ):
     try:
         ticket = crud.update_status(db, ticket_id, status, expected_version=version, actor_user_id=user.id)
+    except ValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't update status - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
     if ticket is None:
@@ -794,6 +830,8 @@ def ui_confirm_category(
 ):
     try:
         ticket = crud.confirm_category(db, ticket_id, category, expected_version=version, actor_user_id=user.id)
+    except ValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't set category - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
     if ticket is None:
@@ -915,10 +953,14 @@ def ui_create_draft_message(
     request: Request, ticket_id: int,
     recipient_email: str = Form(...), subject: str = Form(...), body: str = Form(...),
     db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
 ):
     if crud.get_ticket(db, ticket_id) is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
-    crud.create_draft(db, ticket_id, recipient_email.strip(), subject.strip(), body, created_by_user_id=user.id)
+    try:
+        crud.create_draft(db, ticket_id, recipient_email, subject, body, created_by_user_id=user.id)
+    except ValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
@@ -942,7 +984,9 @@ def ui_update_draft_message(
     if existing is None or existing.ticket_id != ticket_id:
         raise HTTPException(status_code=404, detail=f"Message {message_id} not found on ticket {ticket_id}")
     try:
-        message = crud.update_draft(db, message_id, recipient_email.strip(), subject.strip(), body, expected_version=version)
+        message = crud.update_draft(db, message_id, recipient_email, subject, body, expected_version=version)
+    except ValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
     except crud.MessageNotDraft:

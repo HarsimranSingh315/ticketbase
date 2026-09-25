@@ -145,34 +145,69 @@ class Settings(BaseSettings):
     sla_check_poll_interval_seconds: float = 60.0
 
 
-@lru_cache
-def get_settings() -> Settings:
+STRICT_ENVIRONMENTS = {"production", "staging"}
+KNOWN_ENVIRONMENTS = {"development", "test"} | STRICT_ENVIRONMENTS
+MIN_SECRET_LENGTH = 32
+
+
+class InsecureConfigurationError(RuntimeError):
+    """Raised at startup when a strict environment is missing a setting
+    it cannot safely run without. A crash here is deliberate: a warning
+    in deploy logs is easy to miss, a service that refuses to start is not."""
+
+
+def validate_settings(settings: "Settings") -> "Settings":
     """
-    Cached so Settings() (which reads env vars / .env) only runs once
-    per process, not on every request. Tests override this via
-    app.dependency_overrides[get_settings], same pattern as get_db.
+    Enforces, in code rather than documentation, the settings a real
+    deployment needs. Called by get_settings on every process start.
+
+    Development/test keep their conveniences (auto-generated SECRET_KEY,
+    optional API_KEY) - but ONLY when the environment is explicitly one
+    of those names. An unrecognized value (e.g. a typo like "prod") is
+    rejected outright rather than silently treated as permissive dev
+    mode, which was the realistic way a live deployment could end up
+    unprotected.
     """
-    settings = Settings()
-    if not settings.secret_key:
-        if settings.environment == "production":
-            raise RuntimeError(
-                "SECRET_KEY is not set and ENVIRONMENT=production. Refusing to "
-                "start: an auto-generated key changes every restart and every "
-                "process, which silently breaks CSRF validation and session "
-                "consistency the moment there's more than one worker process - "
-                "a warning in the logs is too easy to miss for something this "
-                "important. Set a real SECRET_KEY in your environment "
-                "(python -c \"import secrets; print(secrets.token_urlsafe(32))\" "
-                "generates one) before deploying."
+    env = settings.environment.strip().lower()
+    settings.environment = env
+    if env not in KNOWN_ENVIRONMENTS:
+        raise InsecureConfigurationError(
+            f"ENVIRONMENT={settings.environment!r} is not recognized. Use one of: "
+            f"{', '.join(sorted(KNOWN_ENVIRONMENTS))}."
+        )
+
+    if env in STRICT_ENVIRONMENTS:
+        problems = []
+        if len(settings.secret_key or "") < MIN_SECRET_LENGTH:
+            problems.append(f"SECRET_KEY must be set and at least {MIN_SECRET_LENGTH} characters")
+        if len(settings.api_key or "") < MIN_SECRET_LENGTH:
+            problems.append(
+                f"API_KEY must be set and at least {MIN_SECRET_LENGTH} characters - without it, "
+                "machine write routes (POST /tickets, PATCH status) would have no credential to check"
             )
+        if problems:
+            raise InsecureConfigurationError(
+                f"Refusing to start with ENVIRONMENT={env}: " + "; ".join(problems)
+                + '. Generate values with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        # Enforced, not merely documented: strict environments are
+        # always served over HTTPS (Render terminates TLS), so a session
+        # cookie without Secure is never correct there.
+        settings.session_cookie_secure = True
+        return settings
+
+    if not settings.secret_key:
         import logging
         import secrets as _secrets
         settings.secret_key = _secrets.token_urlsafe(32)
         logging.getLogger("ticketbase").warning(
-            "SECRET_KEY not set - generated a random one for this process only. "
-            "CSRF tokens will stop validating across a restart, and this is NOT "
-            "safe if you ever run more than one process (they'd each get a "
-            "different key). Set SECRET_KEY in .env for anything beyond a "
-            "single local dev process."
+            "SECRET_KEY not set - generated a random one for this process only "
+            "(development mode). Sessions and CSRF tokens will not survive a restart."
         )
     return settings
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached per process. Tests override via app.dependency_overrides."""
+    return validate_settings(Settings())

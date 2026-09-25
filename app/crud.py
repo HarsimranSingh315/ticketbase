@@ -17,6 +17,8 @@ from sqlalchemy import update as sa_update
 from app import models
 from app.models import User, Session as SessionModel, Invite, UserRole, Customer, Contact, AuditEvent
 from app.rules import compute_priority
+from app.validation import (validate_status, validate_category, validate_email, clean_text,
+                            MAX_NAME, MAX_SUBJECT, MAX_BODY, MAX_DESCRIPTION)
 from app.security import hash_password, generate_token, hash_token
 
 
@@ -88,6 +90,7 @@ def get_audit_events_for_ticket(db: Session, ticket_id: int) -> list[AuditEvent]
 # --- Tickets ---
 
 def create_ticket(db: Session, description: str, customer_id: Optional[int] = None) -> models.Ticket:
+    description = clean_text(description, "description", MAX_DESCRIPTION)
     ticket = models.Ticket(
         description=description,
         priority=compute_priority(description),
@@ -256,6 +259,7 @@ def update_status(db: Session, ticket_id: int, status: str, expected_version: in
     docstring for why this is a real atomic UPDATE, not a Python-side
     check.
     """
+    status = validate_status(status)  # raises ValidationError before any write (B1)
     current = get_ticket(db, ticket_id)
     if current is None:
         return None
@@ -277,6 +281,7 @@ def confirm_category(db: Session, ticket_id: int, category: str, expected_versio
     (an audit event), not just that it happened. Raises VersionConflict
     on a stale write, same as update_status.
     """
+    category = validate_category(category)
     current = get_ticket(db, ticket_id)
     if current is None:
         return None
@@ -345,6 +350,7 @@ def normalize_phone(raw: str) -> str:
 
 
 def create_customer(db: Session, name: str, notes: Optional[str] = None) -> Customer:
+    name = clean_text(name, "name", MAX_NAME, single_line=True)
     customer = Customer(name=name, notes=notes)
     db.add(customer)
     db.commit()
@@ -364,6 +370,9 @@ def search_customers(db: Session, q: Optional[str] = None, limit: int = 20) -> l
 
 
 def create_contact(db: Session, customer_id: int, name: str, email: Optional[str] = None, phone: Optional[str] = None) -> Contact:
+    name = clean_text(name, "name", MAX_NAME, single_line=True)
+    email = validate_email(email) if email and email.strip() else None
+    phone = clean_text(phone, "phone", 40, required=False, single_line=True) or None
     contact = Contact(
         customer_id=customer_id, name=name, email=email, phone=phone,
         normalized_phone=normalize_phone(phone) if phone else None,
@@ -536,6 +545,9 @@ class MessageNotDraft(Exception):
 
 
 def create_draft(db: Session, ticket_id: int, recipient_email: str, subject: str, body: str, created_by_user_id: int) -> OutboundMessage:
+    recipient_email = validate_email(recipient_email, "recipient_email")
+    subject = clean_text(subject, "subject", MAX_SUBJECT, single_line=True)
+    body = clean_text(body, "body", MAX_BODY)
     message = OutboundMessage(
         ticket_id=ticket_id, recipient_email=recipient_email, subject=subject, body=body,
         created_by_user_id=created_by_user_id, status=MessageStatus.draft,
@@ -601,6 +613,9 @@ def update_draft(db: Session, message_id: int, recipient_email: str, subject: st
     guarantee, that isn't). See _atomic_message_update's docstring for
     why the draft-status check is now inside the same atomic UPDATE as
     the version check, not a separate Python comparison."""
+    recipient_email = validate_email(recipient_email, "recipient_email")
+    subject = clean_text(subject, "subject", MAX_SUBJECT, single_line=True)
+    body = clean_text(body, "body", MAX_BODY)
     return _atomic_message_update(
         db, message_id, expected_version,
         changes={
@@ -1050,6 +1065,9 @@ def create_kb_article(db: Session, title: str, category: str, content: str) -> K
     isolation - the TF-IDF/SVD space is fit across all articles at
     once, so a standalone embedding here would live in the wrong space.
     """
+    title = clean_text(title, "title", MAX_NAME, single_line=True)
+    category = validate_category(category)
+    content = clean_text(content, "content", MAX_BODY)
     article = KnowledgeArticle(title=title, category=category, content=content)
     article.embedding = "[]"
     db.add(article)
@@ -1061,6 +1079,9 @@ def create_kb_article(db: Session, title: str, category: str, content: str) -> K
 def update_kb_article(db: Session, article_id: int, title: str, category: str, content: str) -> Optional[KnowledgeArticle]:
     """Same embedding-recompute caveat as create_kb_article - the
     caller must rebuild the RAGIndex after this returns."""
+    title = clean_text(title, "title", MAX_NAME, single_line=True)
+    category = validate_category(category)
+    content = clean_text(content, "content", MAX_BODY)
     article = get_kb_article(db, article_id)
     if article is None:
         return None

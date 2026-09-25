@@ -22,6 +22,7 @@ docstring in app/models.py for why that's deliberate. CSRF protection
 cookie for state-changing requests, which is exactly the situation CSRF
 protection exists for - see OWASP's CSRF cheat sheet.
 """
+import hmac
 from typing import Optional
 
 from fastapi import Header, HTTPException, status, Depends, Request, Form
@@ -49,14 +50,25 @@ def require_api_key(
     settings: Settings = Depends(get_settings),
 ) -> None:
     """
-    Off by default: if settings.api_key is empty (the local/dev/test
-    default), this is a no-op - what lets the existing test suite run
-    without needing to know a secret. Set API_KEY to require it on
-    JSON API writes and CLI use.
+    Machine-client credential check for the JSON write routes.
+
+    The empty-key bypass exists ONLY for explicit development/test
+    environments (so the local suite can run without a secret). It used
+    to apply in every environment, which meant a production deployment
+    without API_KEY accepted anonymous POST /tickets and PATCH status -
+    a P0 finding, reproduced directly before this fix. Strict
+    environments can't start without API_KEY at all (see
+    config.validate_settings); this second check is defense in depth
+    in case validation is ever bypassed.
     """
     if not settings.api_key:
-        return
-    if x_api_key != settings.api_key:
+        if settings.environment in ("development", "test"):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API credentials are not configured on this server.",
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid API key. Send it as the X-API-Key header.",
@@ -110,7 +122,7 @@ def require_session_or_api_key(
     key, only a real session works here; with one configured, either
     does - never "neither, and it's still fine."
     """
-    if x_api_key and settings.api_key and x_api_key == settings.api_key:
+    if x_api_key and settings.api_key and hmac.compare_digest(x_api_key, settings.api_key):
         return
     if get_current_user(request, db) is not None:
         return

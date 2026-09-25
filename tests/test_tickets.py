@@ -104,3 +104,29 @@ def test_list_tickets_search_combines_with_status_filter(admin_client):
     open_vpn = admin_client.get("/tickets", params={"q": "VPN", "status": "open"}).json()
     assert len(open_vpn) == 1
     assert open_vpn[0]["id"] == t1["id"]
+
+
+def test_b1_invalid_ui_status_is_rejected_and_never_stored(admin_client, db_session):
+    """B1 reproduction: status=BOGUS used to be committed, after which
+    every read of the ticket raised LookupError (a bricked ticket)."""
+    from tests.conftest import get_csrf_token
+    from app import crud
+    t = admin_client.post("/tickets", json={"description": "b1"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/status",
+                          data={"status": "BOGUS", "version": t["version"], "csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 422
+    assert "must be one of" in r.text
+    db_session.expire_all()
+    stored = crud.get_ticket(db_session, t["id"])
+    assert stored.status.value == "open" and stored.version == t["version"]
+    assert admin_client.get(f"/ui/tickets/{t['id']}").status_code == 200  # still readable
+
+
+def test_b1_crud_layer_rejects_invalid_status_even_without_the_route(db_session):
+    import pytest
+    from app import crud
+    from app.validation import ValidationError
+    t = crud.create_ticket(db_session, "direct")
+    with pytest.raises(ValidationError):
+        crud.update_status(db_session, t.id, "BOGUS", expected_version=t.version)

@@ -248,3 +248,48 @@ def test_version_increments_on_every_write(admin_client):
     admin_client.post(f"/ui/tickets/{ticket['id']}/category", data={"category": "hardware", "version": 2, "csrf_token": csrf2})
     after_category = admin_client.get(f"/tickets/{ticket['id']}").json()
     assert after_category["version"] == 3
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("bad_name", ["   ", "\t\n", "x" * 201])
+def test_b5_customer_name_rejected_when_blank_or_too_long(admin_client, db_session, bad_name):
+    from tests.conftest import get_csrf_token
+    from app.models import Customer
+    csrf = get_csrf_token(admin_client, "/customers")
+    r = admin_client.post("/customers", data={"name": bad_name, "csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 422
+    assert db_session.query(Customer).count() == 0
+
+
+@_pytest.mark.parametrize("field,value", [
+    ("recipient_email", "not-an-email"),
+    ("recipient_email", "a@b"),
+    ("subject", "   "),
+    ("subject", "line1\nline2"),
+    ("body", "  \n  "),
+])
+def test_b5_malformed_draft_rejected_and_not_stored(admin_client, db_session, field, value):
+    from tests.conftest import get_csrf_token
+    from app.models import OutboundMessage
+    t = admin_client.post("/tickets", json={"description": "b5"}).json()
+    data = {"recipient_email": "ok@example.com", "subject": "Hello", "body": "Body", field: value}
+    data["csrf_token"] = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages", data=data, follow_redirects=False)
+    assert r.status_code == 422
+    assert "Draft not saved" in r.text
+    assert db_session.query(OutboundMessage).count() == 0
+
+
+def test_b5_valid_draft_is_normalized(admin_client, db_session):
+    from tests.conftest import get_csrf_token
+    from app.models import OutboundMessage
+    t = admin_client.post("/tickets", json={"description": "b5 ok"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages", data={
+        "recipient_email": "  Customer@Example.COM ", "subject": "  Hi  ", "body": " Body ", "csrf_token": csrf,
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    m = db_session.query(OutboundMessage).one()
+    assert (m.recipient_email, m.subject, m.body) == ("customer@example.com", "Hi", "Body")

@@ -54,14 +54,68 @@ def test_secret_key_missing_in_production_refuses_to_start(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_secret_key_present_in_production_starts_fine(monkeypatch):
+STRONG = "s" * 48
+
+
+def test_production_with_all_required_settings_starts_and_forces_secure_cookies(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    monkeypatch.setenv("SECRET_KEY", "a-real-production-secret")
+    monkeypatch.setenv("SECRET_KEY", STRONG)
+    monkeypatch.setenv("API_KEY", "k" * 48)
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")  # explicitly wrong on purpose
     from app.config import get_settings
     get_settings.cache_clear()
     settings = get_settings()
-    assert settings.secret_key == "a-real-production-secret"
+    assert settings.secret_key == STRONG
+    assert settings.session_cookie_secure is True  # enforced, not trusted
     get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("env", ["production", "staging"])
+def test_strict_environment_without_api_key_refuses_to_start(monkeypatch, env):
+    """S1 root cause: production previously started without API_KEY and
+    accepted anonymous machine writes."""
+    monkeypatch.setenv("ENVIRONMENT", env)
+    monkeypatch.setenv("SECRET_KEY", STRONG)
+    monkeypatch.delenv("API_KEY", raising=False)
+    from app.config import get_settings, InsecureConfigurationError
+    get_settings.cache_clear()
+    with pytest.raises(InsecureConfigurationError, match="API_KEY"):
+        get_settings()
+    get_settings.cache_clear()
+
+
+def test_production_with_short_secret_key_refuses_to_start(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("SECRET_KEY", "too-short")
+    monkeypatch.setenv("API_KEY", "k" * 48)
+    from app.config import get_settings, InsecureConfigurationError
+    get_settings.cache_clear()
+    with pytest.raises(InsecureConfigurationError, match="SECRET_KEY"):
+        get_settings()
+    get_settings.cache_clear()
+
+
+def test_unrecognized_environment_name_is_rejected_not_treated_as_dev(monkeypatch):
+    """A typo like ENVIRONMENT=prod used to silently mean 'development'
+    - every production protection off, with no error."""
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    from app.config import get_settings, InsecureConfigurationError
+    get_settings.cache_clear()
+    with pytest.raises(InsecureConfigurationError, match="not recognized"):
+        get_settings()
+    get_settings.cache_clear()
+
+
+def test_require_api_key_rejects_when_unconfigured_outside_dev():
+    """Defense in depth: even if startup validation were bypassed, an
+    empty key must not mean 'open' in a strict environment."""
+    from fastapi import HTTPException
+    from app.auth import require_api_key
+    from app.config import Settings
+    s = Settings(environment="production", api_key="", secret_key=STRONG)
+    with pytest.raises(HTTPException) as exc:
+        require_api_key(x_api_key=None, settings=s)
+    assert exc.value.status_code == 503
 
 
 def test_secret_key_missing_in_development_still_just_warns(monkeypatch):
@@ -74,3 +128,41 @@ def test_secret_key_missing_in_development_still_just_warns(monkeypatch):
     settings = get_settings()
     assert settings.secret_key  # auto-generated, not empty
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def production_client(client):
+    """The real app, with production settings injected (strong keys,
+    Secure cookies forced by validate_settings)."""
+    from app.main import app
+    from app.config import get_settings, Settings, validate_settings
+    prod = validate_settings(Settings(environment="production", secret_key=STRONG, api_key="k" * 48,
+                                      database_url="sqlite://"))
+    app.dependency_overrides[get_settings] = lambda: prod
+    yield client
+    app.dependency_overrides.pop(get_settings, None)
+
+
+def test_s1_anonymous_machine_writes_rejected_under_production_config(production_client):
+    """The exact P0 reproduction: before the fix both returned 2xx."""
+    assert production_client.post("/tickets", json={"description": "anon"}).status_code == 401
+    assert production_client.patch("/tickets/1/status", json={"status": "resolved", "version": 1}).status_code == 401
+
+
+def test_s1_correct_api_key_still_works_under_production_config(production_client):
+    r = production_client.post("/tickets", json={"description": "ok"}, headers={"X-API-Key": "k" * 48})
+    assert r.status_code == 201
+
+
+def test_s2_prelogin_cookie_is_secure_under_production_config(production_client, monkeypatch):
+    """The helpers read get_settings() directly (not via Depends), so
+    patch the cached function for this check too."""
+    import app.main as main_mod
+    from app.config import Settings, validate_settings
+    prod = validate_settings(Settings(environment="production", secret_key=STRONG, api_key="k" * 48,
+                                      database_url="sqlite://"))
+    monkeypatch.setattr(main_mod, "get_settings", lambda: prod)
+    r = production_client.get("/login")
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "prelogin_csrf=" in set_cookie
+    assert "Secure" in set_cookie and "HttpOnly" in set_cookie and "Path=/" in set_cookie
