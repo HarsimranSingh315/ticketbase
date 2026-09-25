@@ -31,4 +31,4 @@ USER appuser
 # docker-compose.yml's `migrate` service) that the app service waits on
 # before starting - "run migrations once during release, not in every
 # web/worker startup."
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "scripts/start-web.sh"]

@@ -1,0 +1,70 @@
+# Render Blueprint for TicketBase.
+#
+# This file DESCRIBES the intended deployment. It does not prove any
+# service is running - check the Render dashboard and GET /ready for that.
+#
+# Secrets use `sync: false`: Render prompts for them in the dashboard and
+# never stores them in this repository. Never commit real values here.
+
+databases:
+  - name: ticketbase-db
+    databaseName: ticketbase
+    user: ticketbase
+    postgresMajorVersion: "16"
+    plan: free            # expires after 30 days - see HUMAN_TASKS.md H6
+
+services:
+  - type: web
+    name: ticketbase
+    runtime: docker
+    plan: free            # sleeps when idle; Twilio webhooks may time out while waking
+    healthCheckPath: /ready   # 503 if DB unreachable or schema not at migration head
+    # Migrations run once per deploy, before new code takes traffic.
+    # Pre-deploy commands need a paid plan; on free, see RUNBOOK.md "Migrations on the free plan".
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: ENVIRONMENT
+        value: production     # enforces SECRET_KEY/API_KEY and Secure cookies at startup
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"            # only Render's proxy reaches the container; without this every
+                              # request appears to come from the proxy IP and all users share
+                              # one rate-limit bucket (one bad login could lock everyone out)
+      - key: RUN_MIGRATIONS_ON_START
+        value: "false"        # "true" ONLY on the free plan (no pre-deploy) with one instance
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ticketbase-db
+          property: connectionString
+      - key: SECRET_KEY
+        sync: false           # >= 32 chars; the app refuses to start otherwise
+      - key: API_KEY
+        sync: false           # >= 32 chars; required for machine write routes
+      - key: PUBLIC_BASE_URL
+        sync: false           # e.g. https://ticketbase.onrender.com (Twilio callbacks)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+
+  # --- Optional processes: deliberately NOT enabled (HUMAN_TASKS.md H4). ---
+  # While these are off: approved emails stay queued and are never sent,
+  # and SLA breaches are not recorded in the background. Uncomment to
+  # enable; the worker costs ~$7/month (no free tier for workers).
+  #
+  # - type: worker
+  #   name: ticketbase-outbox-worker
+  #   runtime: docker
+  #   plan: starter
+  #   dockerCommand: python worker.py
+  #   envVars:
+  #     - fromGroup: ticketbase-shared   # or repeat the web service's keys
+  #
+  # - type: cron
+  #   name: ticketbase-sla-check
+  #   runtime: docker
+  #   schedule: "*/5 * * * *"
+  #   dockerCommand: python sla_check.py --once

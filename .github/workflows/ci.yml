@@ -42,8 +42,11 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies (exact versions, incl. test tools)
+        run: pip install -r requirements-dev.txt
+
+      - name: Dependency vulnerability scan
+        run: pip-audit -r requirements.txt
 
       - name: Run tests against SQLite (fast, zero-setup default)
         run: pytest -v
@@ -134,7 +137,10 @@ jobs:
           python-version: "3.9"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # requirements.txt is pinned for the production runtime (3.12) and
+        # some pins (e.g. numpy 2.5) need >=3.11. This job checks LOCAL-DEV
+        # import compatibility, so it resolves from the unpinned ranges.
+        run: pip install -r requirements.in
 
       - name: Import the app under Python 3.9
         run: python -c "import app.main"
