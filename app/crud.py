@@ -1343,3 +1343,16 @@ def create_outbound_call(
     db.commit()
     db.refresh(call)
     return call
+
+
+def outbox_backlog(db: Session) -> dict:
+    """Queue visibility for readiness/monitoring: how many sends are
+    waiting, how old the oldest one is, and how many failed."""
+    from sqlalchemy import func
+    pending_q = db.query(OutboxJob).filter(OutboxJob.status.in_([OutboxJobStatus.pending, OutboxJobStatus.claimed]))
+    oldest = pending_q.with_entities(func.min(OutboxJob.created_at)).scalar()
+    return {
+        "waiting": pending_q.count(),
+        "oldest_waiting_seconds": int((_utcnow() - oldest).total_seconds()) if oldest else 0,
+        "failed": db.query(OutboxJob).filter(OutboxJob.status == OutboxJobStatus.failed).count(),
+    }

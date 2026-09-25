@@ -15,8 +15,32 @@ def test_health_check(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "ok"
-    assert body["database"] == "ok"
+    assert body["status"] == "ready"
+    assert body["checks"]["database"] == "ok"
+
+
+def test_liveness_needs_nothing_external(client):
+    assert client.get("/live").json() == {"status": "alive"}
+
+
+def test_readiness_returns_503_when_database_unreachable(client):
+    """The old /health returned HTTP 200 with a 'degraded' body when the
+    DB was down; platform health checks only read the status code."""
+    from app.main import app
+    from app.database import get_db
+
+    class BrokenSession:
+        def execute(self, *a, **k): raise RuntimeError("db down")
+        def rollback(self): pass
+
+    app.dependency_overrides[get_db] = lambda: BrokenSession()
+    try:
+        r = client.get("/ready")
+    finally:
+        from tests.conftest import override_get_db
+        app.dependency_overrides[get_db] = override_get_db
+    assert r.status_code == 503
+    assert r.json()["checks"]["database"] == "unreachable"
 
 
 def test_create_ticket_returns_201_and_ticket_data(client):

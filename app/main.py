@@ -331,20 +331,92 @@ def get_related_tickets(
     ]
 
 
-@app.get("/health")
-def health_check(db: Session = Depends(get_db)):
-    """
-    Checks actual DB connectivity, not just "the process is running" -
-    a health check that always returns ok regardless of DB state isn't
-    a meaningful one in production.
-    """
+def _expected_migration_head() -> Optional[str]:
+    """The newest Alembic revision in this build, read once. None if the
+    migration scripts aren't present (e.g. a trimmed image)."""
     try:
-        db.execute(__import__("sqlalchemy").text("SELECT 1"))
-        db_ok = True
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        return ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
     except Exception:
-        logger.exception("Health check DB connectivity failure")
-        db_ok = False
-    return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "unreachable"}
+        logger.warning("Could not determine expected migration head")
+        return None
+
+
+_MIGRATION_HEAD = _expected_migration_head()
+
+
+@app.get("/live")
+def liveness():
+    """Liveness: the process is running and serving. Deliberately touches
+    nothing external - a database outage should make the instance NOT
+    READY, not get it restarted in a loop."""
+    return {"status": "alive"}
+
+
+@app.get("/ready")
+def readiness(request: Request, db: Session = Depends(get_db)):
+    """
+    Readiness: can this instance serve real requests right now? Returns
+    503 on failure - the previous /health returned HTTP 200 with a
+    "degraded" body even when the database was unreachable, and a
+    platform health check only reads the status code.
+
+    Checks: database connectivity; schema at the migration head this
+    build expects (production no longer auto-creates tables, so a
+    skipped migration must show up here); retrieval index loaded.
+    Outbox backlog is reported for visibility but doesn't fail readiness -
+    the worker is optional in this deployment (HUMAN_TASKS H4).
+    """
+    from sqlalchemy import text
+    from fastapi.responses import JSONResponse
+    checks, ok = {}, True
+    try:
+        db.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        logger.exception("Readiness: database unreachable")
+        checks["database"] = "unreachable"
+        ok = False
+
+    if ok and _MIGRATION_HEAD:
+        try:
+            current = db.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        except Exception:
+            current = None
+            db.rollback()
+        if current == _MIGRATION_HEAD:
+            checks["schema"] = "ok"
+        elif settings.environment in ("development", "test"):
+            checks["schema"] = "unmanaged (development)"
+        else:
+            checks["schema"] = f"not at migration head (db={current}, expected={_MIGRATION_HEAD})"
+            ok = False
+
+    # Resolve the index through the same provider routes use (honouring
+    # overrides), not app.state directly.
+    provider = request.app.dependency_overrides.get(get_rag_index, get_rag_index)
+    try:
+        index_ok = provider(request) is not None if provider is get_rag_index else provider() is not None
+    except Exception:
+        index_ok = False
+    checks["retrieval_index"] = "ok" if index_ok else "missing"
+    ok = ok and checks["retrieval_index"] == "ok"
+
+    if checks["database"] == "ok":
+        try:
+            checks["outbox"] = crud.outbox_backlog(db)
+        except Exception:
+            db.rollback()
+            checks["outbox"] = "unavailable"
+
+    return JSONResponse(status_code=200 if ok else 503, content={"status": "ready" if ok else "not_ready", "checks": checks})
+
+
+@app.get("/health")
+def health_check(request: Request, db: Session = Depends(get_db)):
+    """Kept for existing health-check configuration; same semantics as /ready."""
+    return readiness(request, db)
 
 
 # --- Telephony (Milestone 3): Twilio webhooks ---
