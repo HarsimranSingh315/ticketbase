@@ -632,3 +632,18 @@ details.disclosure summary {
 /* Conflict / preserved-input panel (B11) */
 .conflict-panel { border-left: 4px solid var(--ochre); background: rgba(0,0,0,0.03); padding: 0.75rem 1rem; margin: 0.75rem 0; }
 .conflict-panel textarea { width: 100%; }
+
+/* Suggestion pending state (B12) */
+.suggestion-box.is-pending { display: grid; gap: 0.5rem; }
+.skeleton-line { display: block; height: 0.8rem; border-radius: 4px; background: rgba(0,0,0,0.08); }
+.skeleton-line.short { width: 60%; }
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton-line { animation: tb-pulse 1.2s ease-in-out infinite; }
+  @keyframes tb-pulse { 50% { opacity: 0.45; } }
+}
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Respect the OS "reduce motion" setting for every animation in the app. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}

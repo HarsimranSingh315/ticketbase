@@ -22,118 +22,126 @@ document.addEventListener("DOMContentLoaded", function () {
     var form = document.getElementById("suggest-form");
     if (!form) return;
 
+    // B12: results render into their OWN region beside the form. The old
+    // code replaced the whole container, deleting the form - there was no
+    // way to retry or generate again, and a hung request left the button on
+    // "Thinking..." forever (no timeout).
+    var TIMEOUT_MS = 30000;
     var button = form.querySelector("button");
-    var container = document.getElementById("suggestion-container");
+    var idleLabel = button ? button.textContent : "Suggest a category";
     var ticketId = form.dataset.ticketId;
-    var errorBox = null;
+    var inFlight = null;
 
-    form.addEventListener("submit", handleSubmit);
+    var result = document.createElement("div");
+    result.id = "suggestion-result";
+    result.setAttribute("aria-live", "polite");
+    form.insertAdjacentElement("afterend", result);
 
-    function handleSubmit(event) {
+    form.addEventListener("submit", function (event) {
         event.preventDefault();
-        setLoading(true);
-        clearError();
+        if (inFlight) return;  // no double submissions
+        request();
+    });
 
-        // credentials: "same-origin" made explicit, not relied on as a
-        // browser default - this endpoint now requires a real session
-        // (see require_session_or_api_key in app/auth.py), so the
-        // session cookie must actually be sent with this request.
+    function request() {
+        var controller = typeof AbortController === "function" ? new AbortController() : null;
+        var timer = controller ? setTimeout(function () { controller.abort(); }, TIMEOUT_MS) : null;
+        inFlight = controller || true;
+        setPending(true);
+
         var csrfField = form.querySelector('input[name="csrf_token"]');
         fetch("/tickets/" + ticketId + "/suggest", {
             method: "POST",
             credentials: "same-origin",
-            headers: { "X-CSRF-Token": csrfField ? csrfField.value : "" }
+            headers: { "X-CSRF-Token": csrfField ? csrfField.value : "" },
+            signal: controller ? controller.signal : undefined
         })
             .then(function (res) {
-                if (res.status === 401) throw new HttpError(401, "Your session expired - reload the page and log in again.");
-                if (res.status === 429) throw new HttpError(429, "You're doing that a bit fast — wait a moment and try again.");
-                if (!res.ok) throw new HttpError(res.status, "Something went wrong on the server (status " + res.status + "). Try again.");
+                if (res.status === 401) throw new UserFacingError("Your session expired. Reload the page and sign in again.");
+                if (res.status === 403) throw new UserFacingError("This page is out of date. Reload it and try again.");
+                if (res.status === 429) throw new UserFacingError("Too many requests just now. Wait a moment, then try again.");
+                if (!res.ok) throw new UserFacingError("The server couldn't produce a suggestion (error " + res.status + ").");
                 return res.json();
             })
-            .then(function (data) {
-                setLoading(false);
-                renderSuggestion(data);
-            })
+            .then(function (data) { renderSuggestion(data); })
             .catch(function (err) {
-                setLoading(false);
-                var message = err instanceof HttpError
-                    ? err.message
-                    : "Couldn't reach the server — check your connection and try again.";
-                showError(message);
+                var message;
+                if (err && err.name === "AbortError") message = "That took too long, so it was stopped. You can try again.";
+                else if (err instanceof UserFacingError) message = err.message;
+                else message = "Couldn't reach the server. Check your connection and try again.";
+                renderError(message);
+            })
+            .then(function () {  // always runs: clean up
+                if (timer) clearTimeout(timer);
+                inFlight = null;
+                setPending(false);
             });
     }
 
-    function HttpError(status, message) {
-        this.status = status;
-        this.message = message;
-    }
-    HttpError.prototype = Object.create(Error.prototype);
+    function UserFacingError(message) { this.message = message; }
+    UserFacingError.prototype = Object.create(Error.prototype);
 
-    function setLoading(isLoading) {
+    function setPending(pending) {
+        result.setAttribute("aria-busy", pending ? "true" : "false");
         if (!button) return;
-        button.disabled = isLoading;
-        button.textContent = isLoading ? "Thinking…" : "Suggest a category";
+        button.disabled = pending;
+        button.textContent = pending ? "Working on a suggestion…" : (result.dataset.hasResult ? "Suggest again" : idleLabel);
+        if (pending) {
+            result.innerHTML = '<div class="suggestion-box is-pending"><span class="skeleton-line"></span>' +
+                '<span class="skeleton-line short"></span><span class="visually-hidden">Working on a suggestion</span></div>';
+        }
     }
 
-    function showError(message) {
-        clearError();
-        errorBox = document.createElement("p");
-        errorBox.className = "form-error-inline";
-        errorBox.setAttribute("role", "alert");
-        errorBox.textContent = message;
-        form.insertAdjacentElement("afterend", errorBox);
-    }
-
-    function clearError() {
-        if (errorBox && errorBox.parentNode) errorBox.parentNode.removeChild(errorBox);
-        errorBox = null;
+    function renderError(message) {
+        result.dataset.hasResult = "";
+        result.innerHTML = '<p class="form-error-inline" role="alert">' + esc(message) + "</p>";
     }
 
     function esc(value) {
         var div = document.createElement("div");
-        div.textContent = value == null ? "" : value;
+        div.textContent = value == null ? "" : String(value);
         return div.innerHTML;
     }
 
+    function score(value) {
+        var n = Number(value);
+        return isFinite(n) ? n.toFixed(2) : "–";
+    }
+
     function renderSuggestion(data) {
-        // Only replace the container's content once we have a real,
-        // final result - this is the point where the form is meant to
-        // go away, having done its job.
+        result.dataset.hasResult = "1";
         if (data.abstained) {
-            container.innerHTML =
+            result.innerHTML =
                 '<div class="suggestion-box is-abstained">' +
-                '<span class="suggestion-label">Not confident enough</span>' +
-                '<p style="margin:0; font-size:13px; color: var(--ink-muted);">' + esc(data.draft_response) + "</p>" +
-                sourcesHTML(data.sources) +
-                "</div>";
+                '<span class="suggestion-label">No confident match</span>' +
+                "<p>" + esc(data.draft_response) + "</p>" +
+                sourcesHTML(data.sources) + "</div>";
             return;
         }
-
-        var pct = Math.round(data.confidence * 100);
         var sourceLabel = data.draft_source === "llm"
-            ? "(AI-written, grounded in the source above)"
-            : "(templated from the source above)";
-
-        container.innerHTML =
+            ? "AI-written from the article(s) below - check it before use"
+            : "Template built from the article(s) below";
+        result.innerHTML =
             '<div class="suggestion-box">' +
-            '<span class="suggestion-label">Suggested, not yet confirmed</span>' +
+            '<span class="suggestion-label">Suggested - not applied</span>' +
             '<p class="suggested-category">' + esc(data.category) + "</p>" +
-            '<div class="confidence-row">' +
-            '<div class="confidence-track"><div class="confidence-fill" style="width:' + pct + '%;"></div></div>' +
-            '<span class="confidence-value">' + pct + '%</span>' +
-            "</div>" +
+            '<p class="hint">Match score ' + score(data.confidence) +
+            " (text similarity to the knowledge base, 0 to 1 - not a probability)</p>" +
             sourcesHTML(data.sources) +
-            '<details class="disclosure"><summary>Drafted response ' + sourceLabel + "</summary>" +
+            '<details class="disclosure"><summary>Draft reply (' + sourceLabel + ")</summary>" +
             '<pre class="draft-response">' + esc(data.draft_response) + "</pre></details>" +
             "</div>" +
-            '<p class="hint">This is a suggestion, not a decision. Use "Confirm category" above to accept it.</p>';
+            '<p class="hint">Nothing changes until you use "Confirm category" above.</p>';
     }
 
     function sourcesHTML(sources) {
         if (!sources || !sources.length) return "";
         var items = sources.map(function (s) {
-            return "<li>" + esc(s.title) + ' <span class="sim">(' + Math.round(s.similarity * 100) + "% similar)</span></li>";
+            var id = parseInt(s.article_id, 10);
+            var title = esc(s.title);
+            var link = isFinite(id) ? '<a href="/kb/' + id + '">' + title + "</a>" : title;
+            return "<li>" + link + ' <span class="sim">score ' + score(s.similarity) + "</span></li>";
         }).join("");
-        return '<details class="disclosure"><summary>What this is based on</summary><ul class="sources-list">' + items + "</ul></details>";
+        return '<details class="disclosure"><summary>Based on these articles</summary><ul class="sources-list">' + items + "</ul></details>";
     }
 });
