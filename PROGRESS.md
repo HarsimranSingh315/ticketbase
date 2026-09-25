@@ -6,7 +6,8 @@ lives in git and `docs/current-state.md`.
 ## Baseline (start of release effort)
 - Python 3.12.3, git `4dec779`, clean tree.
 - SQLite: 186 passed / 5 skipped. PostgreSQL 16: not re-run at baseline.
-- Browser UI inspection: **not yet done** (no browser automation run this session).
+- Browser UI inspection: headless Chromium available at /opt/pw-browsers (Node Playwright 1.56).
+  Server and browser must run in the SAME tool call (background processes don't persist).
 
 ## Review findings - status
 Each was reproduced or confirmed in source before fixing.
@@ -25,15 +26,15 @@ Each was reproduced or confirmed in source before fixing.
 | Legacy plaintext tokens | FIXED | 67a2e30 | migration run on Postgres with legacy rows |
 | B3 KB index per-process | FIXED | this commit | two independent process states, edit+delete visibility tested |
 | B4 KB rebuild failure after commit | FIXED | this commit | real unindexable corpus rejected, rolled back, input preserved; startup degrades safely |
-| B9 pagination | OPEN | | |
-| B11 conflict discards draft | OPEN | | |
-| B12 suggestion retry/timeout | OPEN | | |
+| B9 pagination | FIXED | a3762fd | backend existed but no template rendered it; walk-every-page test |
+| B11 conflict discards draft | FIXED | B11 commit | preserve/compare/reapply/discard; approve hidden while unsaved |
+| B12 suggestion retry/timeout | FIXED | f79dc3e | verified in headless Chromium |
 | Suggestion CSRF | FIXED | bd935e4 | forged/missing token tests |
 | Cache-Control no-store | FIXED | bd935e4 | header tests |
 | Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 234 passed / 5 skipped (Postgres-only race tests skipped by design).
+- SQLite: 242 passed / 5 skipped (Postgres-only race tests skipped by design).
 - PostgreSQL 16: 239 passed.
 - Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
 - pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
@@ -48,11 +49,22 @@ Each was reproduced or confirmed in source before fixing.
   reported but non-fatal). render.yaml, scripts/start-web.sh, RUNBOOK.md.
 - Locked dependencies; CI installs the dev lock and runs pip-audit.
 
+## Findings noted for Phase 4 (from real-browser runs)
+- Google Fonts load from a third party on every page (visitor IPs sent to
+  Google; blocked in this sandbox, so screenshots use fallback fonts).
+  Self-host the fonts and drop fonts.googleapis.com from the CSP.
+- "Match score" hint text looks low-contrast - MEASURE contrast, don't guess.
+- Customer link on ticket page is a raw numeric "Customer ID" box (the
+  brief asks for searchable customer selection).
+- Corrected claim: a suggestion screenshot looked faded; it was captured
+  mid fade-in animation (opacity 1 once settled). Not a defect.
+
 ## Next up
-1. B9 pagination, B11 conflict-draft preservation, B12 suggestion retry/abort.
-2. Phase 3: internal notes + timeline, My Tickets/Unassigned, user admin.
-3. Phase 4: UI with real browser screenshots (not yet inspected in a browser).
-4. Phase 5: AI safety (prompt-injection handling, eval set).
+1. Phase 3: internal notes + unified timeline (with public/internal boundary
+   tests), My Tickets / Unassigned views, user admin (deactivate, role
+   change, revoke sessions, password change).
+2. Phase 4: screenshot-driven UI pass at desktop and mobile widths.
+3. Phase 5: AI safety (prompt-injection handling, eval set, provider docs).
 
 ## Human tasks
 See `HUMAN_TASKS.md`. H1 and H2 block the next deploy.
