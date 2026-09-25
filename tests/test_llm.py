@@ -137,3 +137,25 @@ def test_llm_never_called_when_retrieval_abstains(mock_post, llm_client):
     data = resp.json()
     assert data["abstained"] is True
     mock_post.assert_not_called()
+
+
+@pytest.mark.parametrize("payload", [
+    {"choices": [{"message": {"content": [{"type": "text", "text": "hi"}]}}]},  # the B7 reproduction
+    {"choices": [{"message": "not-a-dict"}]},
+    {"choices": []},
+    {"choices": "nope"},
+    ["not", "a", "dict"],
+    {"choices": [{"message": {"content": 42}}]},
+])
+def test_b7_unexpected_provider_shapes_fall_back_instead_of_raising(payload):
+    from unittest.mock import patch, MagicMock
+    from app.llm import generate_grounded_draft
+    resp = MagicMock(status_code=200, content=b"{}")
+    resp.json.return_value = payload
+    with patch("app.llm.requests.post", return_value=resp):
+        from app.config import Settings
+        result = generate_grounded_draft(
+            Settings(llm_api_key="k", database_url="sqlite://"),
+            ticket_description="VPN broken", source_title="VPN", source_content="Restart the client.",
+        )
+    assert result is None

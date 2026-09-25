@@ -1155,7 +1155,7 @@ def ui_kb_update(
 
 
 @app.post("/kb/{article_id}/delete", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
-def ui_kb_delete(request: Request, article_id: int, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)), settings: Settings = Depends(get_settings)):
+def ui_kb_delete(request: Request, article_id: int, confirm_delete: str = Form(default=""), db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)), settings: Settings = Depends(get_settings)):
     """
     Blocks deleting below 2 remaining articles - not an arbitrary
     limit, a real technical one: the TF-IDF/SVD embedder needs at
@@ -1165,6 +1165,10 @@ def ui_kb_delete(request: Request, article_id: int, db: Session = Depends(get_db
     is a worse failure mode than just refusing the delete with a clear
     reason.
     """
+    if confirm_delete != "yes":
+        # Server-side half of B8's fix: the browser checkbox is a
+        # convenience; this is the actual guard against accidental deletes.
+        raise HTTPException(status_code=400, detail="Deletion not confirmed. Tick the confirmation box and try again.")
     if crud.count_kb_articles(db) <= 2:
         article = crud.get_kb_article(db, article_id)
         return templates.TemplateResponse(

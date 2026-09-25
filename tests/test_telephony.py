@@ -225,3 +225,32 @@ def test_customer_detail_page_shows_call_history(twilio_client, admin_client, db
     assert resp.status_code == 200
     assert "Call history" in resp.text
     assert "Inbound call" in resp.text
+
+
+def test_b6_delayed_ringing_callback_does_not_regress_completed_call(db_session):
+    from app import crud
+    c = crud.upsert_call_from_webhook(db_session, "CA_b6", "inbound", "+15551110000", "+15552220000", "ringing")
+    crud.upsert_call_from_webhook(db_session, "CA_b6", "inbound", "+15551110000", "+15552220000", "in-progress")
+    crud.upsert_call_from_webhook(db_session, "CA_b6", "inbound", "+15551110000", "+15552220000", "completed", duration_seconds=42)
+    ended_at = crud.get_call_by_sid(db_session, "CA_b6").ended_at
+    late = crud.upsert_call_from_webhook(db_session, "CA_b6", "inbound", "+15551110000", "+15552220000", "ringing")
+    assert late.status.value == "completed"
+    assert late.ended_at == ended_at and late.duration_seconds == 42
+
+
+def test_b6_first_terminal_status_is_final(db_session):
+    from app import crud
+    crud.upsert_call_from_webhook(db_session, "CA_b6b", "inbound", "+1555", "+1556", "completed")
+    c = crud.upsert_call_from_webhook(db_session, "CA_b6b", "inbound", "+1555", "+1556", "failed")
+    assert c.status.value == "completed"
+
+
+def test_unmodelled_twilio_status_is_ignored_not_stored(db_session):
+    """Twilio sends 'initiated' for outbound calls; storing it would make
+    the row unreadable (same failure class as B1)."""
+    from app import crud
+    crud.upsert_call_from_webhook(db_session, "CA_init", "outbound", "+1555", "+1556", "queued")
+    c = crud.upsert_call_from_webhook(db_session, "CA_init", "outbound", "+1555", "+1556", "initiated")
+    assert c.status.value == "queued"
+    db_session.expire_all()
+    assert crud.get_call_by_sid(db_session, "CA_init").status.value == "queued"  # re-read is safe

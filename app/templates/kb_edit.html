@@ -42,9 +42,18 @@
 <section class="panel">
     <h2>Delete this article</h2>
     <p class="hint" style="margin-top: 0;">This removes it from SupportRAG's knowledge base immediately. At least 2 articles must always remain.</p>
-    <form method="post" action="/kb/{{ article.id }}/delete" onsubmit="return confirm('Delete this article? This cannot be undone.');">
+    {# B8: the old inline submit-handler confirm() was silently blocked by our own
+       CSP (script-src 'self', no inline handlers), so deletion had NO
+       confirmation at all. A required acknowledgement works without JS,
+       is CSP-safe, is keyboard/screen-reader accessible, and the server
+       re-checks it. #}
+    <form method="post" action="/kb/{{ article.id }}/delete">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-quiet" style="border-color: var(--brick); color: var(--brick);">Delete article</button>
+        <label class="confirm-check">
+            <input type="checkbox" name="confirm_delete" value="yes" required>
+            I understand this permanently deletes "{{ article.title }}".
+        </label>
+        <button type="submit" class="btn btn-danger">Delete article</button>
     </form>
 </section>
 {% endif %}

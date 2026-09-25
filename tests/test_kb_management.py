@@ -49,7 +49,7 @@ def test_delete_kb_article(admin_client):
     # the minimum-2 guard.
     article_id = _create_article(admin_client, title="To be deleted")
     csrf = get_csrf_token(admin_client, f"/kb/{article_id}")
-    resp = admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf}, follow_redirects=False)
+    resp = admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf, "confirm_delete": "yes"}, follow_redirects=False)
     assert resp.status_code == 303
     detail = admin_client.get(f"/kb/{article_id}")
     assert detail.status_code == 404
@@ -67,7 +67,7 @@ def test_cannot_delete_below_two_articles(admin_client, db_session):
     remaining = crud.list_kb_articles(db_session)
     assert len(remaining) == 2
     csrf = get_csrf_token(admin_client, f"/kb/{remaining[0].id}")
-    resp = admin_client.post(f"/kb/{remaining[0].id}/delete", data={"csrf_token": csrf})
+    resp = admin_client.post(f"/kb/{remaining[0].id}/delete", data={"csrf_token": csrf, "confirm_delete": "yes"})
     assert resp.status_code == 409
     assert crud.count_kb_articles(db_session) == 2
 
@@ -162,8 +162,40 @@ def test_deleted_article_no_longer_appears_as_a_suggestion_source(admin_client):
     assert resp1.json()["category"] == "deletetest"
 
     csrf = get_csrf_token(admin_client, f"/kb/{article_id}")
-    admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf})
+    admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf, "confirm_delete": "yes"})
 
     resp2 = admin_client.post(f"/tickets/{ticket['id']}/suggest")
     sources = resp2.json().get("sources", [])
     assert not any(s["article_id"] == article_id for s in sources)
+
+
+def test_b8_delete_without_confirmation_is_refused(admin_client, db_session):
+    from tests.conftest import get_csrf_token
+    from app import crud
+    from app.supportrag import seed_knowledge_base
+    seed_knowledge_base(db_session)
+    before = crud.count_kb_articles(db_session)
+    article_id = crud.list_kb_articles(db_session)[0].id
+    csrf = get_csrf_token(admin_client, f"/kb/{article_id}")
+    r = admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 400
+    assert crud.count_kb_articles(db_session) == before
+
+
+def test_no_template_uses_inline_event_handlers_blocked_by_csp():
+    """B8 root cause: script-src 'self' blocks inline handlers, so any
+    onsubmit/onclick silently does nothing. Guard the whole template set."""
+    import pathlib, re
+    offenders = []
+    for path in pathlib.Path("app/templates").glob("*.html"):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r"\son[a-z]+\s*=", line):
+                offenders.append(f"{path.name}:{n}")
+    assert offenders == [], f"inline handlers found: {offenders}"
+
+
+def test_b10_search_term_is_url_encoded_in_filter_links(admin_client):
+    r = admin_client.get("/", params={"q": "a&status=resolved#x"})
+    assert r.status_code == 200
+    assert "q=a%26status%3Dresolved%23x" in r.text
+    assert "&q=a&status=resolved" not in r.text

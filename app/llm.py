@@ -97,31 +97,49 @@ def generate_grounded_draft(
         # auth errors (401), and anything else - all treated the same
         # way: log it, fall back, keep the feature working.
         logger.warning(
-            "LLM request returned %d, falling back to template. Body: %s",
-            response.status_code, response.text[:300],
+            "LLM request returned HTTP %d; using template.", response.status_code,
         )
         return None
 
+    # B7: validate the payload SHAPE explicitly. A provider returning,
+    # say, a list of content parts instead of a string previously raised
+    # AttributeError on .strip() - not caught, so the "safe fallback"
+    # became a 500. Every non-conforming shape now falls back.
+    # Provider bodies are NOT logged: they can echo the ticket text and
+    # KB excerpt we sent, which is customer data that shouldn't sit in logs.
     try:
         data = response.json()
-        message = data["choices"][0]["message"]
-        text = (message.get("content") or "").strip()
-    except (KeyError, IndexError, ValueError) as exc:
-        logger.warning("LLM response had unexpected shape: %s. Body: %s", exc, response.text[:300])
+    except ValueError:
+        logger.warning("LLM response was not JSON (%d bytes); using template.", len(response.content or b""))
         return None
 
+    text = _extract_completion_text(data)
+    if text is None:
+        logger.warning("LLM response had an unexpected shape; using template.")
+        return None
     if not text:
-        # This used to fail completely silently - the exact bug that
-        # made a real, working API call look identical to "disabled" in
-        # the logs. Now it's visible, and shows what actually came back
-        # (e.g. a non-empty `reasoning` field with an empty `content`
-        # field is the reasoning-budget issue described above).
-        logger.warning(
-            "LLM returned an empty completion, falling back to template. "
-            "finish_reason=%s message_keys=%s",
-            data.get("choices", [{}])[0].get("finish_reason"),
-            list(message.keys()) if isinstance(message, dict) else None,
-        )
+        logger.warning("LLM returned an empty completion; using template.")
         return None
+    return text[:MAX_DRAFT_CHARS]
 
-    return text
+
+MAX_DRAFT_CHARS = 8000
+
+
+def _extract_completion_text(data) -> "str | None":
+    """Returns the stripped completion string, or None if the payload
+    doesn't match the OpenAI-compatible chat shape exactly."""
+    if not isinstance(data, dict):
+        return None
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        return None
+    return content.strip()

@@ -605,3 +605,63 @@ def test_approving_a_message_through_the_wrong_ticket_url_is_rejected(admin_clie
     db_session.expire_all()
     unchanged = crud.get_message(db_session, message_id)
     assert unchanged.status.value == "draft"  # never approved, no job ever queued
+
+
+def _approved_job(db_session, email="b2@example.com", max_attempts=1):
+    from app import crud
+    from app.models import OutboundMessage, MessageStatus, OutboxJob, User, UserRole
+    from app.security import hash_password
+    user = User(email=email, name="B2", password_hash=hash_password("x"), role=UserRole.admin)
+    db_session.add(user); db_session.commit()
+    ticket = crud.create_ticket(db_session, "b2")
+    msg = OutboundMessage(ticket_id=ticket.id, recipient_email="x@example.com", subject="x", body="x",
+                          created_by_user_id=user.id, status=MessageStatus.approved, approved_by_user_id=user.id,
+                          approved_recipient_email="x@example.com", approved_subject="x", approved_body="x")
+    db_session.add(msg); db_session.commit()
+    job = OutboxJob(operation_key=f"message-{msg.id}", message_id=msg.id, max_attempts=max_attempts)
+    db_session.add(job); db_session.commit()
+    return msg, job
+
+
+def test_b2_completion_between_cleanup_select_and_update_is_not_overwritten(db_session):
+    """
+    Deterministic reproduction of B2's interleaving:
+      1. cleanup observes an exhausted, expired job (captures its lease)
+      2. the owning worker's slow send succeeds -> complete_job -> sent
+      3. cleanup's UPDATE runs with the snapshot from step 1
+    Before the fix, step 3 overwrote the confirmed send as failed.
+    """
+    import datetime
+    from app import crud
+    from app.models import OutboxJob, OutboxJobStatus, MessageStatus
+    msg, job = _approved_job(db_session)
+    claimed = crud.claim_next_job(db_session, "w1", lease_seconds=60)
+    token = claimed.lease_token
+    claimed.leased_until = crud._utcnow() - datetime.timedelta(seconds=1)
+    db_session.commit()
+
+    observed = (job.id, msg.id, token)                                          # step 1
+    crud.complete_job(db_session, job.id, token, "provider-accepted-id")        # step 2
+    transitioned = crud.fail_exhausted_job(db_session, *observed, crud._utcnow())  # step 3
+
+    assert transitioned is False
+    db_session.expire_all()
+    final = db_session.query(OutboxJob).get(job.id)
+    assert final.status == OutboxJobStatus.sent
+    assert final.provider_message_id == "provider-accepted-id"
+    assert crud.get_message(db_session, msg.id).status == MessageStatus.sent
+
+
+def test_b2_genuinely_stuck_job_is_still_failed_with_message(db_session):
+    """The fix must not disable the cleanup itself."""
+    import datetime
+    from app import crud
+    from app.models import OutboxJob, OutboxJobStatus, MessageStatus
+    msg, job = _approved_job(db_session, email="b2b@example.com")
+    claimed = crud.claim_next_job(db_session, "w1", lease_seconds=60)
+    claimed.leased_until = crud._utcnow() - datetime.timedelta(seconds=1)
+    db_session.commit()
+    crud.claim_next_job(db_session, "w2", lease_seconds=60)  # triggers the cleanup pass
+    db_session.expire_all()
+    assert db_session.query(OutboxJob).get(job.id).status == OutboxJobStatus.failed
+    assert crud.get_message(db_session, msg.id).status == MessageStatus.failed

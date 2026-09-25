@@ -42,10 +42,10 @@
 <section class="panel">
     <div class="list-controls">
         <div class="tabs">
-            <a href="/{{ '?q=' + current_q if current_q }}" class="{{ 'active' if not current_status and not current_sla else '' }}">All</a>
-            <a href="/?status=open{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
-            <a href="/?status=in_progress{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
-            <a href="/?status=resolved{{ '&q=' + current_q if current_q }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+            <a href="/{{ '?q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if not current_status and not current_sla else '' }}">All</a>
+            <a href="/?status=open{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+            <a href="/?status=in_progress{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
+            <a href="/?status=resolved{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
             <a href="/?sla=breached" class="{{ 'active tabs-breached' if current_sla == 'breached' else 'tabs-breached' }}">Needs attention{% if breached_ids %} ({{ breached_ids|length }}){% endif %}</a>
         </div>
         <form method="get" action="/" class="search-form">

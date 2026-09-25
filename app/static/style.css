@@ -615,3 +615,9 @@ details.disclosure summary {
     .list-controls { flex-direction: column; align-items: stretch; }
     .search-form input[type="search"] { width: 100%; }
 }
+
+/* Destructive actions: visually distinct, never the default-looking button. */
+.btn-danger { background: transparent; border: 1px solid var(--brick); color: var(--brick); }
+.btn-danger:hover, .btn-danger:focus-visible { background: var(--brick); color: #fff; }
+.confirm-check { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.75rem 0; }
+.confirm-check input { margin-top: 0.2rem; }

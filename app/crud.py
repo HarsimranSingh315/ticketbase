@@ -7,6 +7,7 @@ concerns (status codes, request parsing). You could swap FastAPI for
 something else later and reuse everything in this file unchanged.
 """
 import json
+import logging
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -20,6 +21,8 @@ from app.rules import compute_priority
 from app.validation import (validate_status, validate_category, validate_email, clean_text,
                             MAX_NAME, MAX_SUBJECT, MAX_BODY, MAX_DESCRIPTION)
 from app.security import hash_password, generate_token, hash_token
+
+logger = logging.getLogger("ticketbase.crud")
 
 
 def _utcnow() -> datetime:
@@ -713,6 +716,45 @@ def get_outbox_job_for_message(db: Session, message_id: int) -> Optional[OutboxJ
 
 # --- Worker-side outbox operations (see worker.py) ---
 
+def fail_exhausted_job(db: Session, job_id: int, message_id: int, observed_lease_token: Optional[str], now: datetime) -> bool:
+    """
+    Terminally fails ONE job whose worker crashed after its last allowed
+    attempt - but only if it is still in exactly the state we observed.
+
+    B2 (external review, confirmed in source): the previous version
+    selected stuck jobs, then ran `UPDATE ... WHERE id IN (...)` with no
+    re-check. A worker completing the job between those two statements
+    had its provider-confirmed send overwritten as `failed`. Every
+    condition is now re-asserted in the UPDATE itself (status, lease
+    generation, expiry, attempt count), and the message is only marked
+    failed if this job's row genuinely transitioned - both in one
+    transaction. Returns True if it transitioned.
+    """
+    result = db.execute(
+        sa_update(OutboxJob)
+        .where(
+            OutboxJob.id == job_id,
+            OutboxJob.status == OutboxJobStatus.claimed,
+            OutboxJob.lease_token == observed_lease_token,
+            OutboxJob.leased_until < now,
+            OutboxJob.attempts >= OutboxJob.max_attempts,
+        )
+        .values(
+            status=OutboxJobStatus.failed,
+            last_error="Worker stopped responding on its final allowed attempt (lease expired); send outcome unknown - check the provider before resending.",
+            updated_at=now,
+        )
+    )
+    if result.rowcount == 1:
+        db.execute(
+            sa_update(OutboundMessage)
+            .where(OutboundMessage.id == message_id, OutboundMessage.status == MessageStatus.approved)
+            .values(status=MessageStatus.failed)
+        )
+    db.commit()
+    return result.rowcount == 1
+
+
 def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[OutboxJob]:
     """
     Atomically claims one job: either genuinely pending-and-due, or
@@ -758,7 +800,7 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[
     # OutboundMessage stuck at `approved` forever even though its send
     # had genuinely, terminally failed.
     stuck_job_rows = (
-        db.query(OutboxJob.id, OutboxJob.message_id)
+        db.query(OutboxJob.id, OutboxJob.message_id, OutboxJob.lease_token)
         .filter(
             OutboxJob.status == OutboxJobStatus.claimed,
             OutboxJob.leased_until < now,
@@ -766,24 +808,8 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> Optional[
         )
         .all()
     )
-    if stuck_job_rows:
-        stuck_job_ids = [row.id for row in stuck_job_rows]
-        stuck_message_ids = [row.message_id for row in stuck_job_rows]
-        db.execute(
-            sa_update(OutboxJob)
-            .where(OutboxJob.id.in_(stuck_job_ids))
-            .values(
-                status=OutboxJobStatus.failed,
-                last_error="Worker crashed repeatedly and exceeded max_attempts on lease expiry (never reached a normal failed-send path).",
-                updated_at=now,
-            )
-        )
-        db.execute(
-            sa_update(OutboundMessage)
-            .where(OutboundMessage.id.in_(stuck_message_ids))
-            .values(status=MessageStatus.failed)
-        )
-        db.commit()
+    for row in stuck_job_rows:
+        fail_exhausted_job(db, row.id, row.message_id, row.lease_token, now)
 
     candidate = (
         db.query(OutboxJob)
@@ -923,6 +949,15 @@ def fail_job(db: Session, job_id: int, lease_token: str, error: str, backoff_sec
 from app.models import Call, CallDirection, CallStatus
 
 
+_CALL_STATUS_RANK = {"queued": 0, "ringing": 1, "in-progress": 2}
+
+
+def _call_status_rank(status: str) -> int:
+    """Terminal statuses all share the top rank, so once a call has
+    ended, no later callback - terminal or not - can change it."""
+    return _CALL_STATUS_RANK.get(status, 3)
+
+
 def upsert_call_from_webhook(
     db: Session,
     twilio_call_sid: str,
@@ -947,7 +982,17 @@ def upsert_call_from_webhook(
     call = db.query(Call).filter(Call.twilio_call_sid == twilio_call_sid).first()
     terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
 
+    # Twilio also sends statuses this app doesn't model (e.g. "initiated"
+    # for outbound calls). Storing one would brick the row exactly like
+    # B1 did for tickets, so unknown values are ignored for status while
+    # the rest of the callback (duration, recording) is still recorded.
+    known = {s.value for s in CallStatus}
+    if status not in known:
+        logger.info("Ignoring unmodelled call status %r for call %s", status, twilio_call_sid)
+        status = None
+
     if call is None:
+        status = status or "ringing"
         call = Call(
             twilio_call_sid=twilio_call_sid,
             direction=direction,
@@ -958,10 +1003,19 @@ def upsert_call_from_webhook(
         if status == "in-progress":
             call.started_at = _utcnow()
         db.add(call)
-    else:
-        if call.status.value != "in-progress" and status == "in-progress":
-            call.started_at = _utcnow()
-        call.status = status
+    elif status is not None:
+        # B6: callbacks can arrive out of order (a delayed "ringing" after
+        # "completed"). Status only ever moves FORWARD through
+        # queued -> ringing -> in-progress -> terminal, and the first
+        # terminal status is final. A late earlier-stage callback is
+        # ignored for status, so a finished call never "rings" again.
+        current = call.status.value if hasattr(call.status, "value") else call.status
+        if _call_status_rank(status) > _call_status_rank(current):
+            if status == "in-progress" and call.started_at is None:
+                call.started_at = _utcnow()
+            call.status = status
+        else:
+            status = current  # keep terminal-timestamp logic below consistent
 
     if status in terminal_statuses and call.ended_at is None:
         call.ended_at = _utcnow()
