@@ -908,7 +908,7 @@ def ui_ticket_detail(
     )
 
 
-def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, request: Request, settings: Settings, suggestion=None, conflict_error: Optional[str] = None) -> dict:
+def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, request: Request, settings: Settings, suggestion=None, conflict_error: Optional[str] = None, submitted_draft: Optional[dict] = None) -> dict:
     """Shared context-building for every route that renders
     ticket_detail.html, so each one doesn't have to remember every
     field (customer, assignee, agents list, audit trail, draft
@@ -935,7 +935,7 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
         "csrf_token": csrf_token_for_template(request, settings),
         "customer": customer, "contacts": contacts, "assignee": assignee, "agents": agents,
         "audit_events": audit_events, "audit_actors": audit_actors,
-        "suggestion": suggestion, "conflict_error": conflict_error,
+        "suggestion": suggestion, "conflict_error": conflict_error, "submitted_draft": submitted_draft,
         "messages": messages, "message_jobs": message_jobs,
         "sla_deadline": sla_deadline, "sla_breached": sla_breached,
         "calls": calls,
@@ -964,7 +964,7 @@ def ui_suggest_category(
     )
 
 
-def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User, settings: Settings):
+def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User, settings: Settings, submitted_draft: Optional[dict] = None):
     """
     Shared handling for a VersionConflict on any ticket write: re-render
     the ticket page with the ticket's REAL current data (so the form the
@@ -981,12 +981,13 @@ def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: R
     return _render_ticket_error(
         request, db, ticket_id, rag_index, user, settings,
         "This ticket changed since you loaded the page (someone else updated it, or you had it open in another tab). Review the current state below and try again.",
-        status_code=409,
+        status_code=409, submitted_draft=submitted_draft,
     )
 
 
 def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User,
-                         settings: Settings, message: str, status_code: int = 422):
+                         settings: Settings, message: str, status_code: int = 422,
+                         submitted_draft: Optional[dict] = None):
     """Re-renders the ticket page with a visible error instead of a bare
     error response, so the agent stays in context."""
     ticket = crud.get_ticket(db, ticket_id)
@@ -994,7 +995,8 @@ def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_inde
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
-    context = _ticket_detail_context(db, ticket, related, user, request, settings, conflict_error=message)
+    context = _ticket_detail_context(db, ticket, related, user, request, settings, conflict_error=message,
+                                     submitted_draft=submitted_draft)
     return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=status_code)
 
 
@@ -1153,7 +1155,9 @@ def ui_create_draft_message(
     try:
         crud.create_draft(db, ticket_id, recipient_email, subject, body, created_by_user_id=user.id)
     except InputValidationError as e:
-        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.",
+                                    submitted_draft={"message_id": None, "recipient_email": recipient_email,
+                                                     "subject": subject, "body": body, "reason": "invalid"})
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
 
@@ -1179,11 +1183,14 @@ def ui_update_draft_message(
     try:
         message = crud.update_draft(db, message_id, recipient_email, subject, body, expected_version=version)
     except InputValidationError as e:
-        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
-    except crud.VersionConflict:
-        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
-    except crud.MessageNotDraft:
-        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+        mine = {"message_id": message_id, "recipient_email": recipient_email, "subject": subject, "body": body, "reason": "invalid"}
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.",
+                                    submitted_draft=mine)
+    except (crud.VersionConflict, crud.MessageNotDraft):
+        # B11: return the agent's text alongside the current version instead
+        # of discarding it - they can compare, reapply, or discard.
+        mine = {"message_id": message_id, "recipient_email": recipient_email, "subject": subject, "body": body, "reason": "conflict"}
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings, submitted_draft=mine)
     if message is None:
         raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)

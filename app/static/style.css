@@ -628,3 +628,7 @@ details.disclosure summary {
 .pager-links { display: flex; gap: 0.5rem; align-items: center; }
 .pager-page { font-size: 0.9rem; }
 .btn.is-disabled { opacity: 0.45; pointer-events: none; }
+
+/* Conflict / preserved-input panel (B11) */
+.conflict-panel { border-left: 4px solid var(--ochre); background: rgba(0,0,0,0.03); padding: 0.75rem 1rem; margin: 0.75rem 0; }
+.conflict-panel textarea { width: 100%; }

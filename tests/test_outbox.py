@@ -665,3 +665,77 @@ def test_b2_genuinely_stuck_job_is_still_failed_with_message(db_session):
     db_session.expire_all()
     assert db_session.query(OutboxJob).get(job.id).status == OutboxJobStatus.failed
     assert crud.get_message(db_session, msg.id).status == MessageStatus.failed
+
+
+def _draft_on_ticket(admin_client, db_session):
+    from tests.conftest import get_csrf_token
+    from app import crud
+    t = admin_client.post("/tickets", json={"description": "b11"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    admin_client.post(f"/ui/tickets/{t['id']}/messages", data={
+        "recipient_email": "c@example.com", "subject": "Original", "body": "Original body", "csrf_token": csrf})
+    return t, crud.list_messages_for_ticket(db_session, t["id"])[0]
+
+
+def test_b11_conflict_preserves_the_agents_unsaved_text(admin_client, db_session):
+    """B11: a stale-version save used to re-render with only the database
+    copy - everything the agent had typed was lost."""
+    from tests.conftest import get_csrf_token
+    from app import crud
+    t, m = _draft_on_ticket(admin_client, db_session)
+    stale_version = m.version
+    crud.update_draft(db_session, m.id, "c@example.com", "Colleague's subject", "Colleague's body", expected_version=m.version)
+
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages/{m.id}", data={
+        "recipient_email": "c@example.com", "subject": "My careful subject", "body": "My long careful reply",
+        "version": stale_version, "csrf_token": csrf})
+    assert r.status_code == 409
+    assert "My long careful reply" in r.text and "My careful subject" in r.text   # mine, preserved
+    assert "Colleague&#39;s body" in r.text or "Colleague's body" in r.text        # theirs, for comparison
+    assert "Save my version" in r.text
+    assert "Approve &amp; send" not in r.text  # can't approve text you aren't looking at
+
+
+def test_b11_reapplying_after_conflict_saves_the_agents_version(admin_client, db_session):
+    """The re-rendered form carries the CURRENT version, so saving again is a
+    deliberate, successful overwrite rather than another conflict."""
+    import re
+    from tests.conftest import get_csrf_token
+    from app import crud
+    t, m = _draft_on_ticket(admin_client, db_session)
+    stale = m.version
+    crud.update_draft(db_session, m.id, "c@example.com", "Theirs", "Theirs", expected_version=m.version)
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    mine = {"recipient_email": "c@example.com", "subject": "Mine", "body": "Mine body", "csrf_token": csrf}
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages/{m.id}", data={**mine, "version": stale})
+    form_version = re.search(rf'messages/{m.id}" class="message-form">\s*<input[^>]+>\s*<input type="hidden" name="version" value="(\d+)"', r.text).group(1)
+    r2 = admin_client.post(f"/ui/tickets/{t['id']}/messages/{m.id}", data={**mine, "version": form_version}, follow_redirects=False)
+    assert r2.status_code == 303
+    db_session.expire_all()
+    assert crud.get_message(db_session, m.id).body == "Mine body"
+
+
+def test_b11_edit_after_approval_keeps_text_readonly_for_copying(admin_client, db_session):
+    from tests.conftest import get_csrf_token
+    from app import crud
+    t, m = _draft_on_ticket(admin_client, db_session)
+    stale = m.version
+    crud.approve_message(db_session, m.id, actor_user_id=1, expected_version=m.version)
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages/{m.id}", data={
+        "recipient_email": "c@example.com", "subject": "Late edit", "body": "Text I don't want to lose",
+        "version": stale, "csrf_token": csrf})
+    assert r.status_code == 409
+    assert "Text I don&#39;t want to lose" in r.text or "Text I don't want to lose" in r.text
+    assert "approved in the meantime" in r.text
+
+
+def test_b11_invalid_new_draft_keeps_what_was_typed(admin_client):
+    from tests.conftest import get_csrf_token
+    t = admin_client.post("/tickets", json={"description": "b11 new"}).json()
+    csrf = get_csrf_token(admin_client, f"/ui/tickets/{t['id']}")
+    r = admin_client.post(f"/ui/tickets/{t['id']}/messages", data={
+        "recipient_email": "not-an-email", "subject": "Keep me", "body": "Three paragraphs of work", "csrf_token": csrf})
+    assert r.status_code == 422
+    assert "Three paragraphs of work" in r.text and 'value="Keep me"' in r.text
