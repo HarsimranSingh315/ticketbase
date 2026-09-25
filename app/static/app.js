@@ -38,7 +38,12 @@ document.addEventListener("DOMContentLoaded", function () {
         // browser default - this endpoint now requires a real session
         // (see require_session_or_api_key in app/auth.py), so the
         // session cookie must actually be sent with this request.
-        fetch("/tickets/" + ticketId + "/suggest", { method: "POST", credentials: "same-origin" })
+        var csrfField = form.querySelector('input[name="csrf_token"]');
+        fetch("/tickets/" + ticketId + "/suggest", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "X-CSRF-Token": csrfField ? csrfField.value : "" }
+        })
             .then(function (res) {
                 if (res.status === 401) throw new HttpError(401, "Your session expired - reload the page and log in again.");
                 if (res.status === 429) throw new HttpError(429, "You're doing that a bit fast — wait a moment and try again.");

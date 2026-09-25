@@ -13,6 +13,7 @@ Covers the properties that matter most for this feature specifically:
 - NEVER called when retrieval abstained - the one hard safety rule of
   this feature.
 """
+from tests.conftest import csrf_headers
 from unittest.mock import patch, Mock
 
 import pytest
@@ -48,7 +49,7 @@ def _mock_groq_response(text=FAKE_LLM_REPLY, status_code=200):
 def test_llm_disabled_by_default_uses_template(admin_client):
     # Plain `admin_client` has no LLM key configured, just a real session.
     ticket = admin_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     data = resp.json()
     assert data["draft_source"] == "template"
     assert "review and edit before sending" in data["draft_response"]
@@ -58,7 +59,7 @@ def test_llm_disabled_by_default_uses_template(admin_client):
 def test_llm_success_is_used_as_the_draft(mock_post, llm_client):
     mock_post.return_value = _mock_groq_response()
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     data = resp.json()
     assert data["draft_source"] == "llm"
     assert data["draft_response"] == FAKE_LLM_REPLY
@@ -71,7 +72,7 @@ def test_llm_success_is_used_as_the_draft(mock_post, llm_client):
 def test_llm_timeout_falls_back_to_template(mock_post, llm_client):
     mock_post.side_effect = requests.exceptions.Timeout("simulated timeout")
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     assert resp.status_code == 200  # never breaks the endpoint
     data = resp.json()
     assert data["draft_source"] == "template"
@@ -84,7 +85,7 @@ def test_llm_error_status_falls_back_to_template(mock_post, llm_client):
     # rate limit (429) - either way, must not break the suggestion.
     mock_post.return_value = _mock_groq_response(status_code=404)
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     assert resp.status_code == 200
     assert resp.json()["draft_source"] == "template"
 
@@ -97,7 +98,7 @@ def test_llm_malformed_response_falls_back_to_template(mock_post, llm_client):
     mock_resp.json.return_value = {"unexpected": "shape"}
     mock_post.return_value = mock_resp
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     assert resp.status_code == 200
     assert resp.json()["draft_source"] == "template"
 
@@ -121,7 +122,7 @@ def test_llm_empty_content_falls_back_to_template(mock_post, llm_client):
     }
     mock_post.return_value = mock_resp
     ticket = llm_client.post("/tickets", json={"description": "My VPN will not connect"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     assert resp.status_code == 200
     data = resp.json()
     assert data["draft_source"] == "template"
@@ -133,7 +134,7 @@ def test_llm_never_called_when_retrieval_abstains(mock_post, llm_client):
     # The hard safety rule: no confident retrieval match -> no LLM call
     # at all, regardless of whether one is configured.
     ticket = llm_client.post("/tickets", json={"description": "zz flumox glorbnax qwerty"}).json()
-    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = llm_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(llm_client))
     data = resp.json()
     assert data["abstained"] is True
     mock_post.assert_not_called()

@@ -7,11 +7,12 @@ the whole point of the design.
 Shared fixtures (engine, session override, `client`) live in
 conftest.py.
 """
+from tests.conftest import csrf_headers
 
 
 def test_suggest_returns_relevant_category_with_sources(admin_client):
     ticket = admin_client.post("/tickets", json={"description": "My VPN will not connect to the office"}).json()
-    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     assert resp.status_code == 200
     data = resp.json()
     assert data["abstained"] is False
@@ -23,7 +24,7 @@ def test_suggest_returns_relevant_category_with_sources(admin_client):
 
 def test_suggest_never_writes_to_the_ticket(admin_client):
     ticket = admin_client.post("/tickets", json={"description": "Charged twice for my subscription"}).json()
-    admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     # Re-fetch the ticket: category must still be unset, since suggest
     # is read-only and only confirm_category is allowed to write it.
     refetched = admin_client.get(f"/tickets/{ticket['id']}").json()
@@ -32,13 +33,13 @@ def test_suggest_never_writes_to_the_ticket(admin_client):
 
 
 def test_suggest_on_nonexistent_ticket_returns_404(admin_client):
-    resp = admin_client.post("/tickets/9999/suggest")
+    resp = admin_client.post("/tickets/9999/suggest", headers=csrf_headers(admin_client))
     assert resp.status_code == 404
 
 
 def test_suggest_then_confirm_accepts_the_suggested_category(admin_client):
     ticket = admin_client.post("/tickets", json={"description": "Suspicious login on my account, is this a breach?"}).json()
-    suggestion = admin_client.post(f"/tickets/{ticket['id']}/suggest").json()
+    suggestion = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client)).json()
     assert suggestion["abstained"] is False
 
     confirm_resp = admin_client.patch(
@@ -52,7 +53,7 @@ def test_suggest_then_confirm_accepts_the_suggested_category(admin_client):
 
 def test_suggest_abstains_on_unrelated_gibberish(admin_client):
     ticket = admin_client.post("/tickets", json={"description": "xk qz zzz flumox glorbnax"}).json()
-    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     data = resp.json()
     assert data["abstained"] is True
     assert data["category"] is None

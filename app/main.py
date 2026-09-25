@@ -35,7 +35,7 @@ from app.config import get_settings, Settings
 from app.database import engine, Base, get_db, SessionLocal
 from app import crud, schemas
 from app.auth import (
-    require_api_key, require_agent, require_role, require_csrf, require_session_or_api_key,
+    require_api_key, require_agent, require_role, require_csrf, require_session_or_api_key, require_session_csrf_or_api_key,
     get_current_user, csrf_token_for_template, AuthRedirect, SESSION_COOKIE_NAME,
 )
 from app.models import User, UserRole
@@ -127,7 +127,16 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-    response.headers["Referrer-Policy"] = "same-origin"
+    # Invite links carry a bearer token in the query string - send no
+    # referrer at all from those pages so it can't leak onward.
+    response.headers["Referrer-Policy"] = "no-referrer" if request.url.path.startswith("/accept-invite") else "same-origin"
+    # Authenticated pages and JSON contain customer data. Only versioned
+    # static assets may be cached; everything else must not be stored by
+    # browsers or shared proxies (review: missing no-store on sensitive
+    # responses).
+    if not request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
@@ -157,7 +166,11 @@ def _global_template_context(request: Request) -> dict:
     safe on pages like /login where there's genuinely nothing to bind
     a post-login CSRF token to yet.
     """
-    return {"csrf_token": csrf_token_for_template(request, get_settings())}
+    # Resolve settings exactly as routes do (honouring dependency
+    # overrides), so a rendered token is always signed with the same
+    # secret the verifying route uses.
+    settings_provider = request.app.dependency_overrides.get(get_settings, get_settings)
+    return {"csrf_token": csrf_token_for_template(request, settings_provider())}
 
 
 templates = Jinja2Templates(directory="app/templates", context_processors=[_global_template_context])
@@ -264,7 +277,7 @@ def confirm_ticket_category(ticket_id: int, payload: schemas.TicketCategoryConfi
     return ticket
 
 
-@app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut, dependencies=[Depends(require_session_or_api_key)])
+@app.post("/tickets/{ticket_id}/suggest", response_model=schemas.SuggestionOut, dependencies=[Depends(require_session_csrf_or_api_key)])
 @limiter.limit(settings.suggest_rate_limit)
 def suggest_ticket_category(
     request: Request, ticket_id: int,
@@ -490,6 +503,12 @@ def _is_safe_redirect_path(path: Optional[str]) -> bool:
     return True
 
 
+# A real Argon2id hash of a random throwaway value, computed once per
+# process, used to equalize login timing for unknown accounts.
+from app.security import hash_password as _hash_password
+_DUMMY_PASSWORD_HASH = _hash_password(generate_token())
+
+
 @app.post("/login")
 @limiter.limit(settings.login_rate_limit)
 def login_submit(
@@ -512,7 +531,12 @@ def login_submit(
     # password" - distinguishing them lets an attacker enumerate valid
     # emails, which is exactly what a generic message avoids.
     generic_error = "Incorrect email or password."
-    if user is None or not user.is_active or not verify_password(password, user.password_hash):
+    # Always run exactly one Argon2 verification, even for unknown or
+    # inactive accounts. Skipping it for nonexistent emails made those
+    # responses measurably faster - a timing oracle for which emails
+    # have accounts, despite the identical error text.
+    password_ok = verify_password(password, user.password_hash if user is not None else _DUMMY_PASSWORD_HASH)
+    if user is None or not user.is_active or not password_ok:
         return templates.TemplateResponse(
             request, "login.html", {"next": next, "error": generic_error, "prelogin_csrf": prelogin_csrf}, status_code=401,
         )
@@ -749,7 +773,7 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
     }
 
 
-@app.post("/ui/tickets/{ticket_id}/suggest", dependencies=[Depends(require_agent)])
+@app.post("/ui/tickets/{ticket_id}/suggest", dependencies=[Depends(require_agent), Depends(require_csrf)])
 @limiter.limit(settings.suggest_rate_limit)
 def ui_suggest_category(
     request: Request, ticket_id: int,

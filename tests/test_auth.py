@@ -10,6 +10,7 @@ the rest of the suite, which is what lets every other test in this
 project avoid needing to know a secret. These tests exercise the
 mechanism itself by overriding get_settings for just this file.
 """
+from tests.conftest import csrf_headers
 import pytest
 from fastapi.testclient import TestClient
 
@@ -97,7 +98,7 @@ def test_the_four_previously_open_routes_work_with_a_real_session(admin_client):
     assert admin_client.get("/tickets").status_code == 200
     assert admin_client.get(f"/tickets/{ticket_id}").status_code == 200
     assert admin_client.get(f"/tickets/{ticket_id}/related").status_code == 200
-    assert admin_client.post(f"/tickets/{ticket_id}/suggest").status_code == 200
+    assert admin_client.post(f"/tickets/{ticket_id}/suggest", headers=csrf_headers(admin_client)).status_code == 200
 
 
 def test_the_four_previously_open_routes_work_with_a_valid_api_key(auth_client):
@@ -332,3 +333,19 @@ def test_logout_without_csrf_token_is_rejected(admin_client):
 def test_logout_with_wrong_csrf_token_is_rejected(admin_client):
     resp = admin_client.post("/logout", data={"csrf_token": "not-the-real-token"}, follow_redirects=False)
     assert resp.status_code == 403
+
+
+def test_session_suggest_without_csrf_header_is_rejected(admin_client):
+    """Review finding: suggestion POSTs accepted session cookies with no
+    CSRF check, letting a forged cross-site request spend LLM budget and
+    send ticket text to the provider."""
+    t = admin_client.post("/tickets", json={"description": "vpn broken"}).json()
+    assert admin_client.post(f"/tickets/{t['id']}/suggest").status_code == 403
+    assert admin_client.post(f"/tickets/{t['id']}/suggest", headers={"X-CSRF-Token": "forged"}).status_code == 403
+    assert admin_client.post(f"/tickets/{t['id']}/suggest", headers=csrf_headers(admin_client)).status_code == 200
+
+
+def test_ui_suggest_form_requires_csrf(admin_client):
+    t = admin_client.post("/tickets", json={"description": "vpn broken"}).json()
+    assert admin_client.post(f"/ui/tickets/{t['id']}/suggest", data={}).status_code == 422
+    assert admin_client.post(f"/ui/tickets/{t['id']}/suggest", data={"csrf_token": "forged"}).status_code == 403

@@ -206,3 +206,9 @@ def get_csrf_token(authed_client, path="/"):
     match = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
     assert match, f"No csrf_token field found on {path} (status {resp.status_code})"
     return match.group(1)
+
+
+def csrf_headers(authed_client, path="/"):
+    """X-CSRF-Token header for session-authenticated JSON POSTs, exactly
+    as app.js sends it (read from a rendered page's hidden field)."""
+    return {"X-CSRF-Token": get_csrf_token(authed_client, path)}

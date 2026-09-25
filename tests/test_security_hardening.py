@@ -166,3 +166,30 @@ def test_s2_prelogin_cookie_is_secure_under_production_config(production_client,
     set_cookie = r.headers.get("set-cookie", "")
     assert "prelogin_csrf=" in set_cookie
     assert "Secure" in set_cookie and "HttpOnly" in set_cookie and "Path=/" in set_cookie
+
+
+def test_authenticated_pages_are_not_cacheable(admin_client):
+    for path in ["/", "/customers", "/kb"]:
+        assert admin_client.get(path).headers.get("cache-control") == "no-store", path
+
+
+def test_static_assets_remain_cacheable(client):
+    r = client.get("/static/style.css")
+    assert r.status_code == 200 and r.headers.get("cache-control") != "no-store"
+
+
+def test_invite_page_sends_no_referrer(client):
+    assert client.get("/accept-invite?token=whatever").headers.get("referrer-policy") == "no-referrer"
+
+
+def test_unknown_email_login_still_performs_password_verification(client, monkeypatch):
+    """Timing-oracle regression: an unknown email must still cost one
+    Argon2 verification, exactly like a wrong password does."""
+    import app.security as sec
+    calls = []
+    real = sec.verify_password
+    monkeypatch.setattr(sec, "verify_password", lambda pw, h: calls.append(h) or real(pw, h))
+    from tests.conftest import _login
+    r = _login(client, "nobody-here@example.com", "whatever")
+    assert r.status_code == 401
+    assert len(calls) == 1

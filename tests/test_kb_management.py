@@ -8,6 +8,7 @@ up by /suggest on the SAME running server with no restart, and that
 editing an article's content changes what gets suggested - before
 being written as permanent tests. See docs/current-state.md.
 """
+from tests.conftest import csrf_headers
 from tests.conftest import get_csrf_token
 
 
@@ -119,7 +120,7 @@ def test_new_article_is_immediately_usable_by_suggest_with_no_restart(admin_clie
         content="Smart thermostats losing wifi and resetting schedules is usually a router firmware issue or the device being too far from the router.",
     )
 
-    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     data = resp.json()
     assert data["abstained"] is False
     assert data["category"] == "iot"
@@ -136,7 +137,7 @@ def test_editing_article_content_changes_what_gets_suggested(admin_client):
     )
     ticket = admin_client.post("/tickets", json={"description": "I have a question about zzqqxx marker phrase alpha"}).json()
 
-    resp1 = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp1 = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     assert resp1.json()["category"] == "marker"
 
     # Rewrite the content to something unrelated.
@@ -146,7 +147,7 @@ def test_editing_article_content_changes_what_gets_suggested(admin_client):
         data={"title": "Topic marker article", "category": "marker", "content": "Completely different: unrelated filler text about nothing in particular.", "csrf_token": csrf},
     )
 
-    resp2 = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp2 = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     # The original zzqqxx-specific ticket should no longer confidently
     # match the "marker" category, since that content is gone.
     assert resp2.json().get("category") != "marker" or resp2.json()["abstained"] is True
@@ -158,13 +159,13 @@ def test_deleted_article_no_longer_appears_as_a_suggestion_source(admin_client):
         content="Uniquely identifiable content about qqzzyy marker phrase beta.",
     )
     ticket = admin_client.post("/tickets", json={"description": "Question about qqzzyy marker phrase beta"}).json()
-    resp1 = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp1 = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     assert resp1.json()["category"] == "deletetest"
 
     csrf = get_csrf_token(admin_client, f"/kb/{article_id}")
     admin_client.post(f"/kb/{article_id}/delete", data={"csrf_token": csrf, "confirm_delete": "yes"})
 
-    resp2 = admin_client.post(f"/tickets/{ticket['id']}/suggest")
+    resp2 = admin_client.post(f"/tickets/{ticket['id']}/suggest", headers=csrf_headers(admin_client))
     sources = resp2.json().get("sources", [])
     assert not any(s["article_id"] == article_id for s in sources)
 

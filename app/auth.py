@@ -132,6 +132,36 @@ def require_session_or_api_key(
     )
 
 
+def require_session_csrf_or_api_key(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+    x_csrf_token: Optional[str] = Header(default=None),
+    db: DBSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """
+    For POST routes that browser JavaScript calls with the session
+    cookie AND machine clients call with an API key - currently the
+    suggestion endpoint. Suggestions don't change tickets, but they
+    consume rate-limited (and, with an LLM configured, paid) generation
+    and send ticket text to an external provider, so a forged cross-site
+    request shouldn't be able to trigger them (review finding: no CSRF
+    on either suggestion route).
+
+    A valid API key needs no CSRF token: a cross-site page cannot
+    attach custom headers to a victim's request. A session-authenticated
+    call must send the page's CSRF token in the X-CSRF-Token header.
+    """
+    if x_api_key and settings.api_key and hmac.compare_digest(x_api_key, settings.api_key):
+        return
+    if get_current_user(request, db) is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    if not x_csrf_token or not verify_csrf_token(x_csrf_token, session_id, settings.secret_key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Missing or invalid CSRF token. Reload the page and try again.")
+
+
 def require_role(*roles: UserRole):
     """
     Factory: require_role(UserRole.admin, UserRole.agent) etc. Layers on
