@@ -447,3 +447,21 @@ class Call(Base):
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow)
+
+
+class KnowledgeBaseState(Base):
+    """
+    Single-row table holding the knowledge base's revision number.
+
+    B3 (external review, reproduced with two index objects): each web
+    process caches its own retrieval index, and a KB edit only rebuilt
+    the index in the process that handled it - other processes kept
+    serving deleted or outdated articles indefinitely. Every KB mutation
+    now increments `revision` in the same transaction; each process
+    compares it to the revision its cached index was built from and
+    rebuilds when they differ.
+    """
+    __tablename__ = "kb_state"
+
+    id = Column(Integer, primary_key=True)
+    revision = Column(Integer, nullable=False, default=0)

@@ -23,24 +23,36 @@ Each was reproduced or confirmed in source before fixing.
 | B8 CSP blocks delete confirm | FIXED | c39c02f | server check + template guard test |
 | B10 unencoded search URLs | FIXED | c39c02f | encoded-output test |
 | Legacy plaintext tokens | FIXED | 67a2e30 | migration run on Postgres with legacy rows |
-| B3 KB index per-process | OPEN | | |
-| B4 KB rebuild failure after commit | OPEN | | |
+| B3 KB index per-process | FIXED | this commit | two independent process states, edit+delete visibility tested |
+| B4 KB rebuild failure after commit | FIXED | this commit | real unindexable corpus rejected, rolled back, input preserved; startup degrades safely |
 | B9 pagination | OPEN | | |
 | B11 conflict discards draft | OPEN | | |
 | B12 suggestion retry/timeout | OPEN | | |
-| Suggestion CSRF | OPEN | | |
-| Cache-Control no-store | OPEN | | |
-| Login timing (unknown user) | OPEN | | |
+| Suggestion CSRF | FIXED | bd935e4 | forged/missing token tests |
+| Cache-Control no-store | FIXED | bd935e4 | header tests |
+| Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 219 passed / 5 skipped (the 5 are Postgres-only race tests, skipped by design).
-- PostgreSQL 16: 224 passed (commit c39c02f).
+- SQLite: 234 passed / 5 skipped (Postgres-only race tests skipped by design).
+- PostgreSQL 16: 239 passed.
+- Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
+- pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
+- Secret scan: only local/CI placeholders; no .env ever committed.
+- Restore drill: local PostgreSQL 16 only - passed.
+- OPEN INTERMITTENT: one unidentified test failure in one SQLite run
+  (right after the B3/B4 refactor); 10 consecutive clean runs since.
+  Not reproduced, not explained - watch CI.
+
+## Operations done
+- /live and /ready (503 on DB down or schema behind; KB index degraded is
+  reported but non-fatal). render.yaml, scripts/start-web.sh, RUNBOOK.md.
+- Locked dependencies; CI installs the dev lock and runs pip-audit.
 
 ## Next up
-1. Suggestion-route CSRF, Cache-Control no-store, login timing equalization.
-2. /live and /ready endpoints; render.yaml; split dev/prod dependencies + lock.
-3. B3/B4 KB revision + validated index publish.
-4. Phase 3 workflow; Phase 4 UI with real browser screenshots.
+1. B9 pagination, B11 conflict-draft preservation, B12 suggestion retry/abort.
+2. Phase 3: internal notes + timeline, My Tickets/Unassigned, user admin.
+3. Phase 4: UI with real browser screenshots (not yet inspected in a browser).
+4. Phase 5: AI safety (prompt-injection handling, eval set).
 
 ## Human tasks
 See `HUMAN_TASKS.md`. H1 and H2 block the next deploy.

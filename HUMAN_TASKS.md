@@ -28,17 +28,26 @@ Status: `OPEN` / `DONE` / `DECIDED`.
 - **Blocks:** every future deploy.
 - **Meanwhile I continue:** all local work.
 
-## H2 - Confirm the Pre-Deploy Command runs migrations  `OPEN`
-- **Priority:** P0 for the next deploy (it contains migration `b7d2e4f19a60`).
-- **Why you:** Render dashboard access.
-- **Steps:** Web Service -> Settings -> Pre-Deploy Command must be exactly
-  `alembic upgrade head`. After the deploy, open the deploy log and look for a
-  line beginning `retire_legacy_plaintext_tokens:`.
-- **Cost:** none (see H6 for plan limits).
-- **Confirm by replying:** the counts from that log line (they're numbers, not secrets).
-- **Blocks:** production schema correctness. The app no longer auto-creates
-  tables in production, so a skipped migration now fails loudly instead of
-  silently.
+## H2 - Make migrations run, and trust Render's proxy  `OPEN`
+- **Priority:** P0 for the next deploy (it contains migration `b7d2e4f19a60`,
+  and production no longer auto-creates tables).
+- **Why you:** Render dashboard access, and only you know your plan.
+- **Steps:**
+  1. Render -> Web Service -> Settings. If a **Pre-Deploy Command** field
+     exists (paid plans), set it to exactly `alembic upgrade head`.
+  2. If there is NO such field (free plan), add env var
+     `RUN_MIGRATIONS_ON_START=true` instead. Keep one instance only.
+  3. Add env var `FORWARDED_ALLOW_IPS=*`. Without it every request looks
+     like it comes from Render's proxy, so all users share one rate-limit
+     bucket - one person's failed logins could lock everyone out.
+  4. Change the health check path to `/ready` (it returns 503 when the app
+     genuinely can't serve; the old `/health` returned 200 even with the
+     database down).
+  5. After deploying, visit `https://ticketbase.onrender.com/ready`.
+- **Cost:** none.
+- **Confirm by replying:** "H2 done - plan is free/paid" and the `/ready`
+  response text (it contains no secrets).
+- **Blocks:** production schema correctness; meaningful health checks.
 
 ## H3 - Remove bootstrap admin credentials  `OPEN`
 - **Priority:** P1.

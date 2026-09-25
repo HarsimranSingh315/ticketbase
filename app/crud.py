@@ -1109,7 +1109,7 @@ def count_kb_articles(db: Session) -> int:
     return db.query(KnowledgeArticle).count()
 
 
-def create_kb_article(db: Session, title: str, category: str, content: str) -> KnowledgeArticle:
+def create_kb_article(db: Session, title: str, category: str, content: str, commit: bool = True) -> KnowledgeArticle:
     """
     Inserts the row with a placeholder embedding - the caller (see
     main.py's /kb routes) is responsible for calling
@@ -1125,12 +1125,15 @@ def create_kb_article(db: Session, title: str, category: str, content: str) -> K
     article = KnowledgeArticle(title=title, category=category, content=content)
     article.embedding = "[]"
     db.add(article)
-    db.commit()
-    db.refresh(article)
+    if commit:
+        db.commit()
+        db.refresh(article)
+    else:
+        db.flush()
     return article
 
 
-def update_kb_article(db: Session, article_id: int, title: str, category: str, content: str) -> Optional[KnowledgeArticle]:
+def update_kb_article(db: Session, article_id: int, title: str, category: str, content: str, commit: bool = True) -> Optional[KnowledgeArticle]:
     """Same embedding-recompute caveat as create_kb_article - the
     caller must rebuild the RAGIndex after this returns."""
     title = clean_text(title, "title", MAX_NAME, single_line=True)
@@ -1142,12 +1145,15 @@ def update_kb_article(db: Session, article_id: int, title: str, category: str, c
     article.title = title
     article.category = category
     article.content = content
-    db.commit()
-    db.refresh(article)
+    if commit:
+        db.commit()
+        db.refresh(article)
+    else:
+        db.flush()
     return article
 
 
-def delete_kb_article(db: Session, article_id: int) -> bool:
+def delete_kb_article(db: Session, article_id: int, commit: bool = True) -> bool:
     """Returns False if the article didn't exist. Callers (see
     main.py) are responsible for enforcing the "at least 2 articles
     must remain" rule BEFORE calling this - see
@@ -1157,7 +1163,10 @@ def delete_kb_article(db: Session, article_id: int) -> bool:
     if article is None:
         return False
     db.delete(article)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return True
 
 
@@ -1356,3 +1365,24 @@ def outbox_backlog(db: Session) -> dict:
         "oldest_waiting_seconds": int((_utcnow() - oldest).total_seconds()) if oldest else 0,
         "failed": db.query(OutboxJob).filter(OutboxJob.status == OutboxJobStatus.failed).count(),
     }
+
+
+def get_kb_revision(db: Session) -> int:
+    """Current knowledge-base revision (see models.KnowledgeBaseState)."""
+    from app.models import KnowledgeBaseState
+    row = db.query(KnowledgeBaseState).filter(KnowledgeBaseState.id == 1).first()
+    return row.revision if row else 0
+
+
+def bump_kb_revision(db: Session) -> int:
+    """Increments the revision atomically in the CURRENT transaction -
+    call it alongside the KB change so both commit (or roll back) together."""
+    from app.models import KnowledgeBaseState
+    result = db.execute(
+        sa_update(KnowledgeBaseState).where(KnowledgeBaseState.id == 1)
+        .values(revision=KnowledgeBaseState.revision + 1)
+    )
+    if result.rowcount == 0:  # databases created by create_all (dev/test) have no seed row
+        db.add(KnowledgeBaseState(id=1, revision=1))
+        db.flush()
+    return get_kb_revision(db)

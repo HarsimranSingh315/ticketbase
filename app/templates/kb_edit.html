@@ -21,11 +21,11 @@
     <form method="post" action="{{ '/kb/' + article.id|string if article else '/kb' }}" class="message-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Title</label>
-        <input type="text" name="title" value="{{ article.title if article else '' }}" placeholder="e.g. VPN will not connect" required>
+        <input type="text" name="title" value="{{ form.title if form else (article.title if article else '') }}" placeholder="e.g. VPN will not connect" required>
         <label>Category</label>
-        <input type="text" name="category" value="{{ article.category if article else '' }}" placeholder="e.g. connectivity, billing, hardware" required>
+        <input type="text" name="category" value="{{ form.category if form else (article.category if article else '') }}" placeholder="e.g. connectivity, billing, hardware" required>
         <label>Content</label>
-        <textarea name="content" rows="10" placeholder="What an agent should know, and what SupportRAG will cite and draft from…" required>{{ article.content if article else '' }}</textarea>
+        <textarea name="content" rows="10" placeholder="What an agent should know, and what SupportRAG will cite and draft from…" required>{{ form.content if form else (article.content if article else '') }}</textarea>
         <div class="message-actions">
             <button type="submit" class="btn">{% if article %}Save changes{% else %}Create article{% endif %}</button>
         </div>

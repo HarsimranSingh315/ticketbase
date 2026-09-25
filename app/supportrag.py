@@ -113,7 +113,13 @@ def seed_knowledge_base(db: Session) -> None:
     db.commit()
 
 
-def build_rag_index(db: Session) -> RAGIndex:
+class IndexBuildError(RuntimeError):
+    """The current (or candidate) knowledge base can't be turned into a
+    usable retrieval index - e.g. every article is stopwords, or all
+    articles are near-identical, leaving TF-IDF no vocabulary to fit."""
+
+
+def build_rag_index(db: Session, persist: bool = True, seed: bool = True, commit: bool = True) -> RAGIndex:
     """
     Fits a fresh embedder on EVERY current article's content, and
     writes each article's recomputed embedding back to its row, every
@@ -134,7 +140,16 @@ def build_rag_index(db: Session) -> RAGIndex:
     every time makes that class of staleness structurally impossible,
     not just less likely.
     """
-    seed_knowledge_base(db)
+    """
+    B4: `persist=False` builds a CANDIDATE index from the session's
+    current (possibly uncommitted) state without writing or committing
+    anything, so a KB change can be validated BEFORE it's committed.
+    Raises IndexBuildError instead of leaking scikit-learn's ValueError.
+    `seed=False` skips demo seeding, which commits and would otherwise
+    commit a pending, unvalidated change along with it.
+    """
+    if seed:
+        seed_knowledge_base(db)
     articles = db.query(KnowledgeArticle).all()
 
     embedder = Embedder()
@@ -146,12 +161,20 @@ def build_rag_index(db: Session) -> RAGIndex:
         # simply can't run yet; main.py's /kb delete route blocks
         # deleting below 2 articles for exactly this reason, but this
         # check stays here too as a real backstop, not just a UI nicety.
-        embedder.fit([a.content for a in articles])
+        try:
+            embedder.fit([a.content for a in articles])
+        except ValueError as exc:
+            raise IndexBuildError(
+                "The knowledge base doesn't contain enough distinct wording to build a search index "
+                f"({exc}). Add more descriptive content to at least one article."
+            ) from exc
         for a in articles:
             vector = embedder.embed(a.content)
-            a.set_embedding(vector)
+            if persist:
+                a.set_embedding(vector)
             indexed.append(_IndexedArticle(id=a.id, title=a.title, category=a.category, content=a.content, embedding=vector))
-        db.commit()
+        if persist and commit:
+            db.commit()
     else:
         logger.warning("Knowledge base has fewer than 2 articles (%d) - SupportRAG will abstain on everything until more are added", len(articles))
 

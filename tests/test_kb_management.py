@@ -200,3 +200,116 @@ def test_b10_search_term_is_url_encoded_in_filter_links(admin_client):
     assert r.status_code == 200
     assert "q=a%26status%3Dresolved%23x" in r.text
     assert "&q=a&status=resolved" not in r.text
+
+
+def _fake_process(db_session):
+    """An independent web process: its own app.state, the shared database."""
+    from types import SimpleNamespace
+    from app.main import get_rag_index
+    state = SimpleNamespace(rag_index=None, kb_revision=None, rag_index_error=None)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    return lambda: get_rag_index(request, db_session)
+
+
+def test_b3_edit_in_one_process_is_seen_by_another(db_session):
+    """B3 reproduction: an edit rebuilt only the handling process's index;
+    others served the old content indefinitely."""
+    from app import crud
+    from app.supportrag import seed_knowledge_base
+    seed_knowledge_base(db_session)
+    process_a, process_b = _fake_process(db_session), _fake_process(db_session)
+    process_a(); process_b()  # both warm their caches
+    article = crud.list_kb_articles(db_session)[0]
+
+    crud.update_kb_article(db_session, article.id, "Renamed by process A", article.category, article.content)
+    crud.bump_kb_revision(db_session); db_session.commit()
+
+    titles_b = {a.title for a in process_b().articles}
+    assert "Renamed by process A" in titles_b
+
+
+def test_b3_delete_in_one_process_disappears_from_another(db_session):
+    from app import crud
+    from app.supportrag import seed_knowledge_base
+    seed_knowledge_base(db_session)
+    process_b = _fake_process(db_session)
+    victim = crud.list_kb_articles(db_session)[0]
+    assert victim.id in {a.id for a in process_b().articles}
+    crud.delete_kb_article(db_session, victim.id)
+    crud.bump_kb_revision(db_session); db_session.commit()
+    assert victim.id not in {a.id for a in process_b().articles}
+
+
+def test_b3_unchanged_revision_does_not_rebuild(db_session, monkeypatch):
+    """The per-request check must stay cheap: no rebuild when nothing changed."""
+    import app.main as main_mod
+    from app.supportrag import seed_knowledge_base
+    seed_knowledge_base(db_session)
+    process = _fake_process(db_session)
+    process()
+    builds = []
+    real = main_mod.build_rag_index
+    monkeypatch.setattr(main_mod, "build_rag_index", lambda *a, **k: builds.append(1) or real(*a, **k))
+    process(); process()
+    assert builds == []
+
+
+def test_b4_builder_raises_typed_error_on_unindexable_corpus(db_session):
+    import pytest
+    from app import crud
+    from app.supportrag import build_rag_index, IndexBuildError
+    crud.create_kb_article(db_session, "One", "hardware", "printer")
+    crud.create_kb_article(db_session, "Two", "hardware", "the")
+    with pytest.raises(IndexBuildError):
+        build_rag_index(db_session, seed=False)
+
+
+def test_b4_edit_that_breaks_indexing_is_rejected_and_rolled_back(admin_client, db_session):
+    """Real data, no mocked failure: a 2-article KB where one article is
+    'printer' and the other is edited to 'the' cannot be indexed. Before
+    the fix the edit committed first, leaving a KB that broke every later
+    index build (including startup)."""
+    from tests.conftest import get_csrf_token
+    from app import crud
+    keep = crud.create_kb_article(db_session, "Printer offline", "hardware", "printer")
+    target = crud.create_kb_article(db_session, "VPN", "connectivity", "restart the vpn client and reconnect")
+    csrf = get_csrf_token(admin_client, f"/kb/{target.id}")
+    r = admin_client.post(f"/kb/{target.id}", data={
+        "title": "VPN", "category": "connectivity", "content": "the", "csrf_token": csrf}, follow_redirects=False)
+
+    assert r.status_code == 422
+    assert "Changes not saved" in r.text
+    assert ">the</textarea>" in r.text  # the agent's input is preserved, not discarded
+    db_session.expire_all()
+    assert crud.get_kb_article(db_session, target.id).content == "restart the vpn client and reconnect"
+    assert crud.get_kb_revision(db_session) == 0  # no revision published
+
+
+def test_b4_valid_edit_commits_and_bumps_revision(admin_client, db_session):
+    from tests.conftest import get_csrf_token
+    from app import crud
+    crud.create_kb_article(db_session, "Printer offline", "hardware", "power cycle the printer and check the queue")
+    target = crud.create_kb_article(db_session, "VPN", "connectivity", "restart the vpn client")
+    csrf = get_csrf_token(admin_client, f"/kb/{target.id}")
+    r = admin_client.post(f"/kb/{target.id}", data={
+        "title": "VPN", "category": "connectivity", "content": "reinstall the vpn client and sign in again",
+        "csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 303
+    db_session.expire_all()
+    assert "reinstall" in crud.get_kb_article(db_session, target.id).content
+    assert crud.get_kb_revision(db_session) == 1
+
+
+def test_b4_startup_with_unindexable_kb_serves_with_suggestions_disabled(db_session):
+    """Safe-unavailable state: the app must start and report degraded
+    suggestions rather than crash - tickets matter more than suggestions."""
+    from types import SimpleNamespace
+    from app import crud
+    from app.main import load_initial_index
+    crud.create_kb_article(db_session, "One", "hardware", "printer")
+    crud.create_kb_article(db_session, "Two", "hardware", "the")
+    state = SimpleNamespace()
+    load_initial_index(state, db_session)  # the real startup function
+    assert state.rag_index_error is not None
+    assert state.rag_index.articles == []
+    assert state.rag_index is not None  # suggestions abstain; nothing crashes

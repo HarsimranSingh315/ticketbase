@@ -40,7 +40,7 @@ from app.auth import (
 )
 from app.models import User, UserRole
 from app.related_tickets import find_related_tickets
-from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base
+from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base, IndexBuildError, Embedder as _Embedder
 from app.telephony import validate_twilio_signature, get_call_adapter
 from app.security import generate_token
 from app.validation import ValidationError
@@ -74,6 +74,22 @@ def _bootstrap_admin_if_needed(db: Session) -> None:
     logger.info("Bootstrap admin account created: %s", settings.bootstrap_admin_email)
 
 
+def load_initial_index(state, db: Session) -> None:
+    """Startup index load. B4 safe-unavailable state: if the persisted KB
+    can't be indexed, serve with an empty index (every suggestion
+    abstains) rather than crash - tickets, customers and email keep
+    working, and /ready reports suggestions as degraded."""
+    state.rag_index_error = None
+    try:
+        state.rag_index = build_rag_index(db)
+    except IndexBuildError as exc:
+        db.rollback()
+        logger.error("Knowledge base could not be indexed at startup; suggestions disabled: %s", exc)
+        state.rag_index = RAGIndex(embedder=_Embedder(), articles=[])
+        state.rag_index_error = str(exc)
+    state.kb_revision = crud.get_kb_revision(db)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema auto-create is a development convenience only. In strict
@@ -87,7 +103,7 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
-        app.state.rag_index = build_rag_index(db)
+        load_initial_index(app.state, db)
         _bootstrap_admin_if_needed(db)
     finally:
         db.close()
@@ -212,8 +228,66 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-def get_rag_index(request: Request) -> RAGIndex:
-    return request.app.state.rag_index
+def _kb_form_error(request: Request, user: User, settings: Settings, article, form: dict, message: str, status_code: int = 422):
+    """Re-render the KB form with the agent's own submitted text intact."""
+    return templates.TemplateResponse(request, "kb_edit.html", {
+        "article": article, "user": user, "csrf_token": csrf_token_for_template(request, settings),
+        "error": message, "form": form,
+    }, status_code=status_code)
+
+
+class KBChangeRejected(Exception):
+    """A KB edit would leave the knowledge base un-indexable."""
+
+
+def _apply_kb_change(request: Request, db: Session, change):
+    """
+    B4: validate BEFORE commit. Runs `change(db)` without committing,
+    builds a candidate index from that pending state, and only if it
+    succeeds commits the change, its embeddings and a revision bump in ONE
+    transaction, then publishes the new index. On failure everything is
+    rolled back and the last-known-good index stays in service - a bad
+    edit can no longer persist content that breaks every later index
+    build, including at startup.
+
+    B3: the revision bump lets OTHER processes notice (see get_rag_index).
+    """
+    result = change(db)
+    try:
+        candidate = build_rag_index(db, persist=True, seed=False, commit=False)
+    except IndexBuildError as exc:
+        db.rollback()
+        raise KBChangeRejected(str(exc)) from exc
+    revision = crud.bump_kb_revision(db)
+    db.commit()
+    request.app.state.rag_index = candidate
+    request.app.state.kb_revision = revision
+    return result
+
+
+def get_rag_index(request: Request, db: Session = Depends(get_db)) -> RAGIndex:
+    """
+    Returns this process's cached index, first checking one small row
+    (kb_state.revision) to see whether another process changed the KB
+    since this index was built (B3). If so it rebuilds - read-only, no
+    writes - and on failure keeps serving the last-known-good index.
+    """
+    state = request.app.state
+    try:
+        current = crud.get_kb_revision(db)
+    except Exception:
+        logger.exception("KB revision check failed; serving cached index")
+        db.rollback()
+        return state.rag_index
+    if current != getattr(state, "kb_revision", None):
+        try:
+            state.rag_index = build_rag_index(db, persist=False, seed=False)
+            state.rag_index_error = None
+        except IndexBuildError as exc:
+            logger.error("KB revision %s could not be indexed; keeping previous index: %s", current, exc)
+            state.rag_index_error = str(exc)
+        state.kb_revision = current  # on failure too: don't retry the build on every request
+    return state.rag_index
 
 
 # --- JSON API (machine clients: CLI, scripts, integrations) ---
@@ -397,11 +471,19 @@ def readiness(request: Request, db: Session = Depends(get_db)):
     # overrides), not app.state directly.
     provider = request.app.dependency_overrides.get(get_rag_index, get_rag_index)
     try:
-        index_ok = provider(request) is not None if provider is get_rag_index else provider() is not None
+        index_ok = (provider(request, db) if provider is get_rag_index else provider()) is not None
     except Exception:
         index_ok = False
-    checks["retrieval_index"] = "ok" if index_ok else "missing"
-    ok = ok and checks["retrieval_index"] == "ok"
+    # Suggestions are assistive: an unindexable KB degrades them (they
+    # abstain) but must not take ticket handling offline, so it's
+    # reported here without failing readiness.
+    if not index_ok:
+        checks["retrieval_index"] = "missing"
+        ok = False
+    elif getattr(request.app.state, "rag_index_error", None):
+        checks["retrieval_index"] = "degraded - suggestions disabled until the knowledge base is fixed"
+    else:
+        checks["retrieval_index"] = "ok"
 
     if checks["database"] == "ok":
         try:
@@ -1203,6 +1285,8 @@ def ui_kb_new_form(request: Request, user: User = Depends(require_role(UserRole.
 def ui_kb_create(
     request: Request, title: str = Form(...), category: str = Form(...), content: str = Form(...),
     db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Creates the article, then IMMEDIATELY rebuilds the cached RAGIndex
@@ -1222,8 +1306,12 @@ def ui_kb_create(
     test artifact.
     """
     seed_knowledge_base(db)
-    article = crud.create_kb_article(db, title.strip(), category.strip(), content)
-    request.app.state.rag_index = build_rag_index(db)
+    form = {"title": title, "category": category, "content": content}
+    try:
+        article = _apply_kb_change(request, db, lambda d: crud.create_kb_article(d, title, category, content, commit=False))
+    except (ValidationError, KBChangeRejected) as exc:
+        db.rollback()
+        return _kb_form_error(request, user, settings, None, form, f"Article not saved - {getattr(exc, 'message', exc)}")
     return RedirectResponse(url=f"/kb/{article.id}", status_code=303)
 
 
@@ -1242,11 +1330,19 @@ def ui_kb_detail(request: Request, article_id: int, db: Session = Depends(get_db
 def ui_kb_update(
     request: Request, article_id: int, title: str = Form(...), category: str = Form(...), content: str = Form(...),
     db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    settings: Settings = Depends(get_settings),
 ):
-    article = crud.update_kb_article(db, article_id, title.strip(), category.strip(), content)
-    if article is None:
+    existing = crud.get_kb_article(db, article_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
-    request.app.state.rag_index = build_rag_index(db)
+    form = {"title": title, "category": category, "content": content}
+    try:
+        _apply_kb_change(request, db, lambda d: crud.update_kb_article(d, article_id, title, category, content, commit=False))
+    except (ValidationError, KBChangeRejected) as exc:
+        db.rollback()
+        return _kb_form_error(request, user, settings, crud.get_kb_article(db, article_id), form,
+                              f"Changes not saved - {getattr(exc, 'message', exc)}")
     return RedirectResponse(url=f"/kb/{article_id}", status_code=303)
 
 
@@ -1275,8 +1371,11 @@ def ui_kb_delete(request: Request, article_id: int, confirm_delete: str = Form(d
             },
             status_code=409,
         )
-    crud.delete_kb_article(db, article_id)
-    request.app.state.rag_index = build_rag_index(db)
+    try:
+        _apply_kb_change(request, db, lambda d: crud.delete_kb_article(d, article_id, commit=False))
+    except KBChangeRejected as exc:
+        return _kb_form_error(request, user, settings, crud.get_kb_article(db, article_id), None,
+                              f"Not deleted - the remaining articles couldn't be indexed: {exc}", status_code=409)
     return RedirectResponse(url="/kb", status_code=303)
 
 
