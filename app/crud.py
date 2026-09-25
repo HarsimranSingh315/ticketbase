@@ -1386,3 +1386,89 @@ def bump_kb_revision(db: Session) -> int:
         db.add(KnowledgeBaseState(id=1, revision=1))
         db.flush()
     return get_kb_revision(db)
+
+
+# --- Pagination (B9) ---------------------------------------------------------
+# Lists previously truncated silently (tickets at MAX_PAGE_SIZE, customers at
+# 20, a customer's tickets at 50) with no way to reach older records.
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Page:
+    items: list = field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+
+    @property
+    def pages(self) -> int:
+        return max(1, -(-self.total // self.page_size))
+
+    @property
+    def has_prev(self) -> bool:
+        return self.page > 1
+
+    @property
+    def has_next(self) -> bool:
+        return self.page < self.pages
+
+    @property
+    def first_index(self) -> int:
+        return 0 if self.total == 0 else (self.page - 1) * self.page_size + 1
+
+    @property
+    def last_index(self) -> int:
+        return min(self.total, self.page * self.page_size)
+
+
+def paginate(query, page: int, page_size: int) -> Page:
+    """Counts, then fetches one page. An out-of-range page number is
+    clamped to the last page rather than returning an empty screen."""
+    page_size = max(1, min(page_size, 100))
+    total = query.order_by(None).count()
+    pages = max(1, -(-total // page_size))
+    page = min(max(1, page), pages)
+    items = query.offset((page - 1) * page_size).limit(page_size).all()
+    return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+def _like_term(q: str) -> str:
+    """Escapes LIKE wildcards so a search for '%' or '_' matches those
+    characters literally instead of matching everything."""
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def ticket_page(db: Session, status: Optional[str] = None, q: Optional[str] = None,
+                page: int = 1, page_size: int = 20) -> Page:
+    """Ticket list for the UI. An unrecognized status is ignored rather than
+    passed to the database: on PostgreSQL an invalid enum literal raised
+    DataError (a 500 from a hand-edited URL) - reproduced before this fix."""
+    query = db.query(models.Ticket)
+    if status in {s.value for s in models.TicketStatus}:
+        query = query.filter(models.Ticket.status == status)
+    if q and q.strip():
+        query = query.filter(models.Ticket.description.ilike(_like_term(q.strip()), escape="\\"))
+    return paginate(query.order_by(models.Ticket.created_at.desc(), models.Ticket.id.desc()), page, page_size)
+
+
+def customer_page(db: Session, q: Optional[str] = None, page: int = 1, page_size: int = 20) -> Page:
+    query = db.query(Customer)
+    if q and q.strip():
+        query = query.filter(Customer.name.ilike(_like_term(q.strip()), escape="\\"))
+    return paginate(query.order_by(Customer.name.asc(), Customer.id.asc()), page, page_size)
+
+
+def customer_ticket_page(db: Session, customer_id: int, page: int = 1, page_size: int = 20) -> Page:
+    query = db.query(models.Ticket).filter(models.Ticket.customer_id == customer_id)
+    return paginate(query.order_by(models.Ticket.created_at.desc(), models.Ticket.id.desc()), page, page_size)
+
+
+def customer_ticket_page(db: Session, customer_id: int, page: int = 1, page_size: int = 20) -> Page:
+    """Paginated exact history (B9: the old get_customer_tickets silently
+    stopped at 50, making older tickets unreachable from the UI)."""
+    query = (db.query(models.Ticket)
+             .filter(models.Ticket.customer_id == customer_id)
+             .order_by(models.Ticket.created_at.desc(), models.Ticket.id.desc()))
+    return paginate(query, page, page_size)

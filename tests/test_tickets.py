@@ -154,3 +154,13 @@ def test_b1_crud_layer_rejects_invalid_status_even_without_the_route(db_session)
     t = crud.create_ticket(db_session, "direct")
     with pytest.raises(ValidationError):
         crud.update_status(db_session, t.id, "BOGUS", expected_version=t.version)
+
+
+def test_ui_create_ticket_with_overlong_description_shows_form_error_not_500(admin_client):
+    """Regression for a bug introduced in 208c400: importing
+    app.validation.ValidationError into main.py shadowed pydantic's
+    ValidationError, so this route's schema error went uncaught (500)."""
+    from tests.conftest import get_csrf_token
+    csrf = get_csrf_token(admin_client, "/")
+    r = admin_client.post("/ui/tickets", data={"description": "x" * 20000, "csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 422

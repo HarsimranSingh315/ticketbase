@@ -293,3 +293,43 @@ def test_b5_valid_draft_is_normalized(admin_client, db_session):
     assert r.status_code == 303
     m = db_session.query(OutboundMessage).one()
     assert (m.recipient_email, m.subject, m.body) == ("customer@example.com", "Hi", "Body")
+
+
+def test_b9_ticket_list_renders_pagination_and_reaches_every_record(admin_client, db_session):
+    """B9: the route computed a pager but no template rendered it, so only
+    the first page of tickets was reachable from the UI."""
+    import re
+    from app import crud
+    for i in range(45):
+        crud.create_ticket(db_session, f"pagination ticket {i:02d}")
+    first = admin_client.get("/")
+    assert "of 45" in first.text and 'rel="next"' in first.text
+    seen, url = set(), "/"
+    while url:
+        page = admin_client.get(url)
+        seen.update(re.findall(r"pagination ticket (\d\d)", page.text))
+        m = re.search(r'href="([^"]+)" rel="next"', page.text)
+        url = m.group(1).replace("&amp;", "&") if m else None
+    assert len(seen) == 45  # every record reachable by following Next
+
+
+def test_b9_pagination_preserves_search_filter(admin_client, db_session):
+    import re
+    from app import crud
+    for i in range(25):
+        crud.create_ticket(db_session, f"printer jam {i}")
+    crud.create_ticket(db_session, "unrelated vpn issue")
+    page = admin_client.get("/", params={"q": "printer"})
+    nxt = re.search(r'href="([^"]+)" rel="next"', page.text).group(1).replace("&amp;", "&")
+    assert "q=printer" in nxt and "page=2" in nxt
+
+
+def test_b9_customer_history_is_paginated_not_capped(admin_client, db_session):
+    from app import crud
+    c = crud.create_customer(db_session, "Big Customer")
+    for i in range(55):
+        t = crud.create_ticket(db_session, f"history {i}")
+        t.customer_id = c.id
+    db_session.commit()
+    r = admin_client.get(f"/customers/{c.id}")
+    assert "of 55" in r.text  # the old silent cap was 50

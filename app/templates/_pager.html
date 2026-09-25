@@ -1,0 +1,19 @@
+{# Shared pagination control (B9). Expects `pager`, `prev_url`, `next_url`.
+   URLs are built server-side from the current query string, so every active
+   filter survives and is correctly encoded. Hidden when everything fits. #}
+{% if pager and pager.total > 0 %}
+<nav class="pager" aria-label="Pagination">
+    <span class="pager-status" aria-live="polite">
+        Showing {{ pager.first_index }}–{{ pager.last_index }} of {{ pager.total }}
+    </span>
+    {% if pager.pages > 1 %}
+    <span class="pager-links">
+        {% if prev_url %}<a href="{{ prev_url }}" rel="prev" class="btn btn-quiet">← Previous</a>
+        {% else %}<span class="btn btn-quiet is-disabled" aria-disabled="true">← Previous</span>{% endif %}
+        <span class="pager-page">Page {{ pager.page }} of {{ pager.pages }}</span>
+        {% if next_url %}<a href="{{ next_url }}" rel="next" class="btn btn-quiet">Next →</a>
+        {% else %}<span class="btn btn-quiet is-disabled" aria-disabled="true">Next →</span>{% endif %}
+    </span>
+    {% endif %}
+</nav>
+{% endif %}

@@ -30,6 +30,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        {% include "_pager.html" %}
     {% else %}
         <p class="empty-state">No customers {{ 'match "' + current_q + '"' if current_q else 'yet — create one above' }}.</p>
     {% endif %}

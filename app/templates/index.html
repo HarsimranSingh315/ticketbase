@@ -81,6 +81,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        {% include "_pager.html" %}
     {% else %}
         {% if current_sla == 'breached' %}
             <p class="empty-state">Nothing overdue — every open ticket is within its SLA window.</p>

@@ -43,7 +43,7 @@ from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base, IndexBuildError, Embedder as _Embedder
 from app.telephony import validate_twilio_signature, get_call_adapter
 from app.security import generate_token
-from app.validation import ValidationError
+from app.validation import ValidationError as InputValidationError  # distinct name: pydantic's ValidationError is also used here
 
 settings = get_settings()
 
@@ -197,8 +197,8 @@ async def auth_redirect_handler(request: Request, exc: AuthRedirect):
     return RedirectResponse(url=f"/login?next={exc.next_path}", status_code=303)
 
 
-@app.exception_handler(ValidationError)
-async def validation_error_handler(request: Request, exc: ValidationError):
+@app.exception_handler(InputValidationError)
+async def validation_error_handler(request: Request, exc: InputValidationError):
     """Any input problem that reaches CRUD without a route-specific
     handler becomes a 422 with the field named - never a 500."""
     from fastapi.responses import JSONResponse
@@ -813,9 +813,19 @@ def accept_invite_submit(
 # AND a valid CSRF token (require_csrf), since these are cookie-
 # authenticated state changes.
 
+def _pager_links(request: Request, pager: "crud.Page") -> dict:
+    """Prev/next URLs built server-side from the CURRENT query string, so
+    every active filter is preserved and correctly encoded."""
+    return {
+        "prev_url": str(request.url.include_query_params(page=pager.page - 1)) if pager.has_prev else None,
+        "next_url": str(request.url.include_query_params(page=pager.page + 1)) if pager.has_next else None,
+    }
+
+
 @app.get("/")
 def ui_index(
     request: Request, status: Optional[str] = None, q: Optional[str] = None, sla: Optional[str] = None,
+    page: int = Query(default=1, ge=1, le=100_000),
     db: Session = Depends(get_db), user: User = Depends(require_agent),
     settings: Settings = Depends(get_settings),
 ):
@@ -826,18 +836,23 @@ def ui_index(
         # every non-resolved status, most overdue first. Ignores the
         # status/q filters deliberately: "what needs attention right
         # now" is a different question than "show me open tickets".
-        tickets = crud.list_breached_tickets(db, sla_hours)
-        breached_ids = {t.id for t in tickets}
+        breached = crud.list_breached_tickets(db, sla_hours)
+        breached_ids = {t.id for t in breached}
+        size = settings.default_page_size
+        pages = max(1, -(-len(breached) // size))
+        current = min(page, pages)
+        pager = crud.Page(items=breached[(current - 1) * size: current * size], total=len(breached), page=current, page_size=size)
     else:
-        tickets = crud.list_tickets(db, status=status, q=q, limit=settings.max_page_size)
+        pager = crud.ticket_page(db, status=status, q=q, page=page, page_size=settings.default_page_size)
         breached_ids = {t.id for t in crud.list_breached_tickets(db, sla_hours)}
+    tickets = pager.items
 
     stats = crud.get_ticket_stats(db)
     return templates.TemplateResponse(
         request, "index.html",
         {
             "tickets": tickets, "current_status": status, "current_q": q, "current_sla": sla,
-            "stats": stats, "breached_ids": breached_ids,
+            "stats": stats, "breached_ids": breached_ids, "pager": pager, **_pager_links(request, pager),
             "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )
@@ -991,7 +1006,7 @@ def ui_update_status(
 ):
     try:
         ticket = crud.update_status(db, ticket_id, status, expected_version=version, actor_user_id=user.id)
-    except ValidationError as e:
+    except InputValidationError as e:
         return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't update status - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
@@ -1008,7 +1023,7 @@ def ui_confirm_category(
 ):
     try:
         ticket = crud.confirm_category(db, ticket_id, category, expected_version=version, actor_user_id=user.id)
-    except ValidationError as e:
+    except InputValidationError as e:
         return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't set category - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
@@ -1137,7 +1152,7 @@ def ui_create_draft_message(
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     try:
         crud.create_draft(db, ticket_id, recipient_email, subject, body, created_by_user_id=user.id)
-    except ValidationError as e:
+    except InputValidationError as e:
         return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
     return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
 
@@ -1163,7 +1178,7 @@ def ui_update_draft_message(
         raise HTTPException(status_code=404, detail=f"Message {message_id} not found on ticket {ticket_id}")
     try:
         message = crud.update_draft(db, message_id, recipient_email, subject, body, expected_version=version)
-    except ValidationError as e:
+    except InputValidationError as e:
         return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Draft not saved - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
@@ -1309,7 +1324,7 @@ def ui_kb_create(
     form = {"title": title, "category": category, "content": content}
     try:
         article = _apply_kb_change(request, db, lambda d: crud.create_kb_article(d, title, category, content, commit=False))
-    except (ValidationError, KBChangeRejected) as exc:
+    except (InputValidationError, KBChangeRejected) as exc:
         db.rollback()
         return _kb_form_error(request, user, settings, None, form, f"Article not saved - {getattr(exc, 'message', exc)}")
     return RedirectResponse(url=f"/kb/{article.id}", status_code=303)
@@ -1339,7 +1354,7 @@ def ui_kb_update(
     form = {"title": title, "category": category, "content": content}
     try:
         _apply_kb_change(request, db, lambda d: crud.update_kb_article(d, article_id, title, category, content, commit=False))
-    except (ValidationError, KBChangeRejected) as exc:
+    except (InputValidationError, KBChangeRejected) as exc:
         db.rollback()
         return _kb_form_error(request, user, settings, crud.get_kb_article(db, article_id), form,
                               f"Changes not saved - {getattr(exc, 'message', exc)}")
@@ -1383,11 +1398,13 @@ def ui_kb_delete(request: Request, article_id: int, confirm_delete: str = Form(d
 # semantic related tickets - see crud.get_customer_tickets's docstring) ---
 
 @app.get("/customers")
-def ui_customers_list(request: Request, q: Optional[str] = None, db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
-    customers = crud.search_customers(db, q=q)
+def ui_customers_list(request: Request, q: Optional[str] = None, page: int = Query(default=1, ge=1, le=100_000),
+                      db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+    pager = crud.customer_page(db, q=q, page=page, page_size=settings.default_page_size)
     return templates.TemplateResponse(
         request, "customers.html",
-        {"customers": customers, "current_q": q, "user": user, "csrf_token": csrf_token_for_template(request, settings)},
+        {"customers": pager.items, "pager": pager, **_pager_links(request, pager),
+         "current_q": q, "user": user, "csrf_token": csrf_token_for_template(request, settings)},
     )
 
 
@@ -1398,17 +1415,18 @@ def ui_create_customer(request: Request, name: str = Form(...), db: Session = De
 
 
 @app.get("/customers/{customer_id}")
-def ui_customer_detail(request: Request, customer_id: int, db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+def ui_customer_detail(request: Request, customer_id: int, page: int = Query(default=1, ge=1, le=100_000), db: Session = Depends(get_db), user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
     customer = crud.get_customer(db, customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
     contacts = crud.list_contacts_for_customer(db, customer_id)
-    tickets = crud.get_customer_tickets(db, customer_id)
+    pager = crud.customer_ticket_page(db, customer_id, page=page, page_size=settings.default_page_size)
+    tickets = pager.items
     calls = crud.list_calls_for_customer(db, customer_id)
     return templates.TemplateResponse(
         request, "customer_detail.html",
         {
-            "customer": customer, "contacts": contacts, "tickets": tickets, "calls": calls,
+            "customer": customer, "contacts": contacts, "tickets": tickets, "calls": calls, "pager": pager, **_pager_links(request, pager),
             "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )
