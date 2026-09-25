@@ -145,13 +145,29 @@ TEST_REVIEWER_EMAIL = "test-reviewer@example.com"
 TEST_REVIEWER_PASSWORD = "test-reviewer-password-123"
 
 
+def _login(client, email, password):
+    """
+    Logs in through the real route, including the pre-login CSRF field
+    - login now needs its own double-submit-cookie token (see
+    main.py's login_form/login_submit), since there's no session yet
+    to derive the usual synchronizer token from. A GET first sets the
+    cookie and renders the token into the form; this pulls it out of
+    that response before posting, the same as a real browser would.
+    """
+    import re
+    login_page = client.get("/login")
+    match = re.search(r'name="prelogin_csrf" value="([^"]*)"', login_page.text)
+    prelogin_csrf = match.group(1) if match else ""
+    return client.post("/login", data={"email": email, "password": password, "prelogin_csrf": prelogin_csrf})
+
+
 @pytest.fixture
 def admin_client(client, db_session):
     """A TestClient already logged in as a real admin user."""
     from app import crud as _crud
     from app.models import UserRole
     _crud.create_user(db_session, email=TEST_ADMIN_EMAIL, name="Test Admin", password=TEST_ADMIN_PASSWORD, role=UserRole.admin)
-    resp = client.post("/login", data={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD})
+    resp = _login(client, TEST_ADMIN_EMAIL, TEST_ADMIN_PASSWORD)
     assert resp.status_code in (200, 303), f"admin login failed in fixture: {resp.status_code}"
     return client
 
@@ -162,7 +178,7 @@ def agent_client(client, db_session):
     from app import crud as _crud
     from app.models import UserRole
     _crud.create_user(db_session, email=TEST_AGENT_EMAIL, name="Test Agent", password=TEST_AGENT_PASSWORD, role=UserRole.agent)
-    resp = client.post("/login", data={"email": TEST_AGENT_EMAIL, "password": TEST_AGENT_PASSWORD})
+    resp = _login(client, TEST_AGENT_EMAIL, TEST_AGENT_PASSWORD)
     assert resp.status_code in (200, 303), f"agent login failed in fixture: {resp.status_code}"
     return client
 
@@ -173,7 +189,7 @@ def reviewer_client(client, db_session):
     from app import crud as _crud
     from app.models import UserRole
     _crud.create_user(db_session, email=TEST_REVIEWER_EMAIL, name="Test Reviewer", password=TEST_REVIEWER_PASSWORD, role=UserRole.reviewer)
-    resp = client.post("/login", data={"email": TEST_REVIEWER_EMAIL, "password": TEST_REVIEWER_PASSWORD})
+    resp = _login(client, TEST_REVIEWER_EMAIL, TEST_REVIEWER_PASSWORD)
     assert resp.status_code in (200, 303), f"reviewer login failed in fixture: {resp.status_code}"
     return client
 

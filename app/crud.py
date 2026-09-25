@@ -17,7 +17,7 @@ from sqlalchemy import update as sa_update
 from app import models
 from app.models import User, Session as SessionModel, Invite, UserRole, Customer, Contact, AuditEvent
 from app.rules import compute_priority
-from app.security import hash_password, generate_token
+from app.security import hash_password, generate_token, hash_token
 
 
 def _utcnow() -> datetime:
@@ -426,21 +426,32 @@ def create_user(db: Session, email: str, name: str, password: str, role: UserRol
     return user
 
 
-def create_session(db: Session, user_id: int, ttl_hours: int) -> SessionModel:
+def create_session(db: Session, user_id: int, ttl_hours: int) -> tuple[str, SessionModel]:
+    """
+    Returns (raw_token, session) - the raw token is what goes in the
+    cookie (see main.py's login/accept_invite routes); only its hash
+    is ever written to the database. See hash_token's docstring for
+    why storing the raw value was a real gap, not a style preference.
+    """
+    raw_token = generate_token()
     session = SessionModel(
-        id=generate_token(),
+        id=hash_token(raw_token),
         user_id=user_id,
         expires_at=_utcnow() + timedelta(hours=ttl_hours),
     )
     db.add(session)
     db.commit()
     db.refresh(session)
-    return session
+    return raw_token, session
 
 
 def get_active_session(db: Session, session_id: str) -> Optional[SessionModel]:
     """A session is active if it exists, isn't revoked, and hasn't expired.
     All three checks happen here so nothing else has to remember to.
+
+    `session_id` is the RAW value read from the cookie - hashed here
+    before the lookup, since only the hash is ever stored (see
+    hash_token's docstring).
 
     Uses naive UTC (_utcnow(), see above) throughout, matching how this
     project's plain `DateTime` columns actually round-trip on both
@@ -449,7 +460,7 @@ def get_active_session(db: Session, session_id: str) -> Optional[SessionModel]:
     datetimes here would raise a TypeError on comparison, which is a
     real, easy-to-hit bug worth avoiding deliberately rather than by luck.
     """
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    session = db.query(SessionModel).filter(SessionModel.id == hash_token(session_id)).first()
     if session is None:
         return None
     if session.revoked_at is not None:
@@ -465,15 +476,21 @@ def touch_session(db: Session, session: SessionModel) -> None:
 
 
 def revoke_session(db: Session, session_id: str) -> None:
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    """`session_id` is the RAW cookie value - hashed before lookup,
+    same reason as get_active_session."""
+    session = db.query(SessionModel).filter(SessionModel.id == hash_token(session_id)).first()
     if session is not None:
         session.revoked_at = _utcnow()
         db.commit()
 
 
-def create_invite(db: Session, email: str, role: UserRole, invited_by_user_id: int, ttl_hours: int) -> Invite:
+def create_invite(db: Session, email: str, role: UserRole, invited_by_user_id: int, ttl_hours: int) -> tuple[str, Invite]:
+    """Returns (raw_token, invite) - the raw token goes in the invite
+    LINK shown to the admin; only its hash is stored, same reasoning as
+    create_session."""
+    raw_token = generate_token()
     invite = Invite(
-        token=generate_token(),
+        token=hash_token(raw_token),
         email=email,
         role=role,
         invited_by_user_id=invited_by_user_id,
@@ -482,11 +499,13 @@ def create_invite(db: Session, email: str, role: UserRole, invited_by_user_id: i
     db.add(invite)
     db.commit()
     db.refresh(invite)
-    return invite
+    return raw_token, invite
 
 
 def get_valid_invite(db: Session, token: str) -> Optional[Invite]:
-    invite = db.query(Invite).filter(Invite.token == token).first()
+    """`token` is the RAW value from the invite link's query string -
+    hashed before lookup, same reasoning as get_active_session."""
+    invite = db.query(Invite).filter(Invite.token == hash_token(token)).first()
     if invite is None:
         return None
     if invite.used_at is not None:

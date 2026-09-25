@@ -186,6 +186,16 @@ def test_ui_status_update_rejected_without_login(client, db_session):
     assert check.status.value == "open"
 
 
+def _login_with_next(client, email, password, next_path):
+    """Same as conftest's _login, but also carries a `next` value -
+    needed for these redirect-specific tests."""
+    import re
+    login_page = client.get("/login")
+    match = re.search(r'name="prelogin_csrf" value="([^"]*)"', login_page.text)
+    prelogin_csrf = match.group(1) if match else ""
+    return client.post("/login", data={"email": email, "password": password, "next": next_path, "prelogin_csrf": prelogin_csrf}, follow_redirects=False)
+
+
 def test_login_redirects_to_safe_relative_next_path(admin_client, db_session):
     """The normal, intended case still works after the fix."""
     from app.models import User, UserRole
@@ -194,10 +204,7 @@ def test_login_redirects_to_safe_relative_next_path(admin_client, db_session):
     db_session.add(user)
     db_session.commit()
 
-    resp = admin_client.post(
-        "/login", data={"email": "redirtest1@example.com", "password": "password123", "next": "/kb"},
-        follow_redirects=False,
-    )
+    resp = _login_with_next(admin_client, "redirtest1@example.com", "password123", "/kb")
     assert resp.status_code == 303
     assert resp.headers["location"] == "/kb"
 
@@ -218,9 +225,110 @@ def test_login_rejects_open_redirect_to_external_site(admin_client, db_session):
     db_session.commit()
 
     for malicious_next in ["https://evil.com/phishing", "http://evil.com", "//evil.com", "/\\evil.com", "javascript:alert(1)"]:
-        resp = admin_client.post(
-            "/login", data={"email": "redirtest2@example.com", "password": "password123", "next": malicious_next},
-            follow_redirects=False,
-        )
+        resp = _login_with_next(admin_client, "redirtest2@example.com", "password123", malicious_next)
         assert resp.status_code == 303
         assert resp.headers["location"] == "/", f"expected safe fallback for next={malicious_next!r}, got {resp.headers['location']!r}"
+
+
+def test_session_token_is_hashed_at_rest(client, db_session):
+    """
+    A real gap an external review found: session tokens were stored as
+    plain, directly usable bearer secrets - anyone reading the sessions
+    table (a DB leak, an overly-curious query) could impersonate any
+    logged-in user immediately, no cracking needed. Verified directly:
+    the raw cookie value and the stored DB value must differ, and
+    hashing the cookie must produce exactly the stored value.
+    """
+    from app.models import User, UserRole, Session as SessionModel
+    from app.security import hash_password, hash_token
+    from tests.conftest import _login
+    user = User(email="hashtest1@example.com", name="HashTest1", password_hash=hash_password("password123"), role=UserRole.agent)
+    db_session.add(user)
+    db_session.commit()
+
+    resp = _login(client, "hashtest1@example.com", "password123")
+    cookie_value = client.cookies.get("session_id")
+    assert cookie_value is not None
+
+    db_session.expire_all()
+    stored = db_session.query(SessionModel).filter(SessionModel.user_id == user.id).first()
+    assert stored is not None
+    assert stored.id != cookie_value  # never the raw value
+    assert stored.id == hash_token(cookie_value)  # always the hash of it
+
+    # And the real cookie still authenticates correctly end-to-end.
+    home = client.get("/")
+    assert home.status_code == 200
+
+
+def test_invite_token_is_hashed_at_rest(admin_client, db_session):
+    """Same protection, for invite tokens."""
+    from app.models import Invite
+    from app.security import hash_token
+    from tests.conftest import get_csrf_token
+    csrf = get_csrf_token(admin_client, "/invite")
+    resp = admin_client.post("/invite", data={"email": "newagent@example.com", "role": "agent", "csrf_token": csrf})
+    assert resp.status_code == 200
+    # The invite link shown to the admin contains the RAW token.
+    import re
+    match = re.search(r"token=([\w\-]+)", resp.text)
+    assert match is not None
+    raw_token_from_link = match.group(1)
+
+    db_session.expire_all()
+    stored = db_session.query(Invite).filter(Invite.email == "newagent@example.com").first()
+    assert stored is not None
+    assert stored.token != raw_token_from_link
+    assert stored.token == hash_token(raw_token_from_link)
+
+    # And the raw token from the link still redeems correctly.
+    accept_page = admin_client.get(f"/accept-invite?token={raw_token_from_link}")
+    assert accept_page.status_code == 200
+
+
+def test_login_without_prelogin_csrf_is_rejected(client, db_session):
+    """The actual security property, not just that normal login works:
+    a POST to /login missing the double-submit-cookie token (as a
+    forged cross-site request necessarily would be, since it can't
+    read the victim's cookie to copy the value) must be rejected."""
+    from app.models import User, UserRole
+    from app.security import hash_password
+    user = User(email="csrflogin@example.com", name="CsrfLogin", password_hash=hash_password("password123"), role=UserRole.agent)
+    db_session.add(user)
+    db_session.commit()
+
+    # No GET /login first, so no cookie exists - and no prelogin_csrf field either.
+    resp = client.post("/login", data={"email": "csrflogin@example.com", "password": "password123"})
+    assert resp.status_code == 403
+
+
+def test_login_with_mismatched_prelogin_csrf_is_rejected(client, db_session):
+    """Even WITH a cookie present, a submitted value that doesn't match
+    it must be rejected - this is what actually makes it a double-
+    submit check, not just \"is something present\"."""
+    from app.models import User, UserRole
+    from app.security import hash_password
+    user = User(email="csrflogin2@example.com", name="CsrfLogin2", password_hash=hash_password("password123"), role=UserRole.agent)
+    db_session.add(user)
+    db_session.commit()
+
+    client.get("/login")  # sets the real cookie
+    resp = client.post("/login", data={"email": "csrflogin2@example.com", "password": "password123", "prelogin_csrf": "attacker-guessed-wrong-value"})
+    assert resp.status_code == 403
+
+
+def test_logout_without_csrf_token_is_rejected(admin_client):
+    """A forged cross-site POST to /logout (an attacker's page
+    submitting a hidden form to a victim's browser) has no way to know
+    the victim's real CSRF token - must be rejected, not silently
+    logging the victim out. A wholly missing field is FastAPI's own
+    422 (the form field is required at all); a present-but-wrong value
+    is the 403 from this route's own check - both are genuine
+    rejections, tested separately."""
+    resp = admin_client.post("/logout", follow_redirects=False)
+    assert resp.status_code == 422
+
+
+def test_logout_with_wrong_csrf_token_is_rejected(admin_client):
+    resp = admin_client.post("/logout", data={"csrf_token": "not-the-real-token"}, follow_redirects=False)
+    assert resp.status_code == 403

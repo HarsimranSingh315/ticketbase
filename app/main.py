@@ -42,6 +42,7 @@ from app.models import User, UserRole
 from app.related_tickets import find_related_tickets
 from app.supportrag import SupportRAGService, RAGIndex, build_rag_index, seed_knowledge_base
 from app.telephony import validate_twilio_signature, get_call_adapter
+from app.security import generate_token
 
 settings = get_settings()
 
@@ -137,7 +138,24 @@ async def security_headers_middleware(request: Request, call_next):
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
-templates = Jinja2Templates(directory="app/templates")
+def _global_template_context(request: Request) -> dict:
+    """
+    Makes csrf_token available in EVERY template render automatically,
+    not just the ones that remember to pass it explicitly - the logout
+    form lives in base.html, rendered on every authenticated page, so
+    it needs a valid token regardless of which specific route rendered
+    the page. A route that explicitly passes its own csrf_token (most
+    of them do, for their own forms) simply overrides this default -
+    Starlette merges context processor output first, then the route's
+    own context on top, so nothing here changes existing behavior.
+    Returns None when there's no session (see csrf_token_for_template) -
+    safe on pages like /login where there's genuinely nothing to bind
+    a post-login CSRF token to yet.
+    """
+    return {"csrf_token": csrf_token_for_template(request, get_settings())}
+
+
+templates = Jinja2Templates(directory="app/templates", context_processors=[_global_template_context])
 
 
 @app.exception_handler(AuthRedirect)
@@ -390,9 +408,33 @@ async def twilio_status_webhook(request: Request, db: Session = Depends(get_db),
 # Real session-based auth for human agents using the browser. See
 # app/auth.py for why this is separate from the JSON API's shared key.
 
+PRELOGIN_CSRF_COOKIE_NAME = "prelogin_csrf"
+
+
 @app.get("/login")
 def login_form(request: Request, next: Optional[str] = None):
-    return templates.TemplateResponse(request, "login.html", {"next": next, "error": None})
+    """
+    Login needs its OWN CSRF mechanism, distinct from every other form
+    in the app: the existing synchronizer-token pattern
+    (compute_csrf_token) derives its token FROM a session ID, and an
+    anonymous visitor here has no session yet - there's nothing to
+    derive from. This uses the double-submit-cookie pattern instead: a
+    random value is set as a cookie AND embedded in the form; on
+    submit, the two are compared. An attacker's cross-site page can't
+    read the victim's cookie (same-origin policy) or guess its random
+    value, so it can't construct a forged request where both match -
+    flagged by an external review as a real, previously-missing gap on
+    this specific route.
+    """
+    existing_token = request.cookies.get(PRELOGIN_CSRF_COOKIE_NAME)
+    prelogin_token = existing_token or generate_token()
+    response = templates.TemplateResponse(request, "login.html", {"next": next, "error": None, "prelogin_csrf": prelogin_token})
+    if not existing_token:
+        # Not set httponly=False for JS access - the token is embedded
+        # server-side into the rendered form directly, so the cookie
+        # never needs to be read by client-side script at all.
+        response.set_cookie(PRELOGIN_CSRF_COOKIE_NAME, prelogin_token, httponly=True, samesite="lax", max_age=3600)
+    return response
 
 
 def _is_safe_redirect_path(path: Optional[str]) -> bool:
@@ -423,9 +465,15 @@ def login_submit(
     email: str = Form(...),
     password: str = Form(...),
     next: Optional[str] = Form(default=None),
+    prelogin_csrf: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
     from app.security import verify_password
+    import hmac as _hmac
+
+    cookie_token = request.cookies.get(PRELOGIN_CSRF_COOKIE_NAME, "")
+    if not cookie_token or not prelogin_csrf or not _hmac.compare_digest(cookie_token, prelogin_csrf):
+        raise HTTPException(status_code=403, detail="Invalid or expired form. Reload the login page and try again.")
 
     user = crud.get_user_by_email(db, email.strip().lower())
     # Deliberately identical error for "no such user" and "wrong
@@ -434,25 +482,32 @@ def login_submit(
     generic_error = "Incorrect email or password."
     if user is None or not user.is_active or not verify_password(password, user.password_hash):
         return templates.TemplateResponse(
-            request, "login.html", {"next": next, "error": generic_error}, status_code=401,
+            request, "login.html", {"next": next, "error": generic_error, "prelogin_csrf": prelogin_csrf}, status_code=401,
         )
 
-    session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
+    raw_token, session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
     safe_next = next if _is_safe_redirect_path(next) else "/"
     response = RedirectResponse(url=safe_next, status_code=303)
     response.set_cookie(
-        SESSION_COOKIE_NAME, session.id,
+        SESSION_COOKIE_NAME, raw_token,
         httponly=True, samesite="lax", secure=settings.session_cookie_secure,
         max_age=settings.session_ttl_hours * 3600,
     )
+    response.delete_cookie(PRELOGIN_CSRF_COOKIE_NAME)
     return response
 
 
 @app.post("/logout")
-def logout(request: Request, db: Session = Depends(get_db)):
+def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
+    from app.security import verify_csrf_token
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    if session_id:
-        crud.revoke_session(db, session_id)
+    # Verified BEFORE revoking anything - a forged cross-site logout is
+    # a nuisance, not a severe risk, but there's no reason to skip the
+    # same protection every other authenticated POST route already has
+    # (an external review flagged this specific gap by name).
+    if not session_id or not verify_csrf_token(csrf_token, session_id, settings.secret_key):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Reload the page and try again.")
+    crud.revoke_session(db, session_id)
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE_NAME)
     return response
@@ -486,8 +541,8 @@ def invite_submit(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid role: {role}")
 
-    invite = crud.create_invite(db, email=email.strip().lower(), role=role_enum, invited_by_user_id=user.id, ttl_hours=settings.invite_ttl_hours)
-    invite_link = str(request.url_for("accept_invite_form")) + f"?token={invite.token}"
+    raw_token, invite = crud.create_invite(db, email=email.strip().lower(), role=role_enum, invited_by_user_id=user.id, ttl_hours=settings.invite_ttl_hours)
+    invite_link = str(request.url_for("accept_invite_form")) + f"?token={raw_token}"
     return templates.TemplateResponse(
         request, "invite.html",
         {"user": user, "csrf_token": csrf_token_for_template(request, settings), "invite_link": invite_link, "error": None},
@@ -536,10 +591,10 @@ def accept_invite_submit(
 
     user = crud.create_user(db, email=invite.email, name=name, password=password, role=invite.role)
     crud.mark_invite_used(db, invite)
-    session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
+    raw_token, session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
-        SESSION_COOKIE_NAME, session.id,
+        SESSION_COOKIE_NAME, raw_token,
         httponly=True, samesite="lax", secure=settings.session_cookie_secure,
         max_age=settings.session_ttl_hours * 3600,
     )

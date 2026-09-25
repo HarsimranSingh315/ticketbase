@@ -39,9 +39,10 @@ def test_login_with_correct_credentials_succeeds(admin_client):
 def test_login_with_wrong_password_rejected(client, db_session):
     from app import crud
     from app.models import UserRole
+    from tests.conftest import _login
     crud.create_user(db_session, email=TEST_ADMIN_EMAIL, name="Test Admin", password=TEST_ADMIN_PASSWORD, role=UserRole.admin)
 
-    resp = client.post("/login", data={"email": TEST_ADMIN_EMAIL, "password": "wrong-password"})
+    resp = _login(client, TEST_ADMIN_EMAIL, "wrong-password")
     assert resp.status_code == 401
     assert "Incorrect email or password" in resp.text
 
@@ -49,7 +50,8 @@ def test_login_with_wrong_password_rejected(client, db_session):
 def test_login_with_unknown_email_rejected_with_generic_message(client):
     """Same error message as a wrong password - a distinct message would
     let an attacker enumerate which emails have accounts."""
-    resp = client.post("/login", data={"email": "nobody@example.com", "password": "whatever"})
+    from tests.conftest import _login
+    resp = _login(client, "nobody@example.com", "whatever")
     assert resp.status_code == 401
     assert "Incorrect email or password" in resp.text
 
@@ -64,7 +66,9 @@ def test_password_is_never_stored_in_plaintext(db_session):
 
 
 def test_logout_revokes_the_session(admin_client):
-    resp = admin_client.post("/logout", follow_redirects=False)
+    from tests.conftest import get_csrf_token
+    csrf = get_csrf_token(admin_client, "/")
+    resp = admin_client.post("/logout", data={"csrf_token": csrf}, follow_redirects=False)
     assert resp.status_code == 303
 
     # Same client (same cookie jar) - the old session cookie is either
@@ -138,8 +142,9 @@ def test_full_invite_and_accept_flow(admin_client, client):
     # The new account can independently log in with its own credentials.
     from fastapi.testclient import TestClient
     from app.main import app
+    from tests.conftest import _login
     fresh_client = TestClient(app)
-    login_resp = fresh_client.post("/login", data={"email": "newagent@example.com", "password": "newagentpassword123"})
+    login_resp = _login(fresh_client, "newagent@example.com", "newagentpassword123")
     assert login_resp.status_code in (200, 303)
 
 

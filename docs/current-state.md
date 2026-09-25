@@ -1465,3 +1465,99 @@ logout), the P2 rate-limiting/CSP/trusted-host deployment hardening,
 the P1 telephony-as-real-conversation-workflow gap, the P2 RAG
 confidence/versioning findings, and the operational-scale items
 (thousand-line files, N+1 queries, explicit seeding).
+
+---
+
+## Fourth round: token hashing + CSRF on login/logout
+
+### Session and invite tokens were stored in plaintext at rest
+
+Confirmed directly by reading the code: `Session.id` (the session
+token itself) and `Invite.token` were stored as the raw, directly
+usable secret - anyone who ever read those tables (a DB leak, a
+backup, an overly-curious query) could impersonate any logged-in user
+or redeem any pending invite immediately, no cracking needed, unlike
+the already Argon2id-hashed passwords.
+
+**Fix:** `hash_token()` (SHA-256, deliberately not Argon2id - these
+are already 256-bit random values from `generate_token()`, not
+low-entropy passwords, so a slow hash buys no real security and would
+measurably slow down every authenticated request, since session
+validation happens on every page load). `create_session`/
+`create_invite` now return `(raw_token, object)` - the raw token goes
+in the cookie/invite link, only its hash is ever written to the
+database. Lookups (`get_active_session`, `revoke_session`,
+`get_valid_invite`) hash the incoming value before querying.
+
+**Verified directly, not just tested**: pulled the real cookie value
+and the real stored DB value apart in a live run and confirmed they
+differ, confirmed hashing the cookie produces exactly the stored
+value, and confirmed the full login flow still authenticates
+correctly end-to-end with the real cookie. 2 new tests
+(`test_session_token_is_hashed_at_rest`,
+`test_invite_token_is_hashed_at_rest`).
+
+### Login and logout had no CSRF protection
+
+Confirmed by reading the routes: `/logout` (POST, so at least not
+trivially forgeable via a bare `<img>` tag) had no CSRF check at all,
+and `/login` had none either - a genuinely different problem, since
+the existing synchronizer-token pattern derives its token FROM a
+session ID, and an anonymous visitor has no session yet to derive one
+from.
+
+**Fix:** `/logout` uses the existing session-based CSRF mechanism
+(the user is already authenticated at logout time). `/login` uses the
+double-submit-cookie pattern instead: a random value is set as a
+cookie when the login page renders and embedded in the form; on
+submit, the two must match. An attacker's cross-site page can't read
+the victim's cookie (same-origin policy) or guess its random value, so
+it can't construct a forged request where both match.
+
+Made `csrf_token` available in every template automatically via a
+Jinja2 context processor, rather than relying on each route to
+remember to pass it - the logout form lives in `base.html`, rendered
+on every authenticated page, so it needs a valid token regardless of
+which specific route rendered the page. Routes that already pass their
+own `csrf_token` explicitly are unaffected (their value wins).
+
+**Two real bugs caught while building and testing this, before
+shipping**:
+1. An import got tangled while adding a new one (`get_call_adapter`
+   ended up merged into the wrong import line, `app.security` instead
+   of `app.telephony`) - caught immediately by an ImportError when
+   testing, not a runtime surprise later.
+2. The wrong-password retry path on `/login` re-rendered the form
+   without carrying the `prelogin_csrf` value forward, which would
+   have silently broken re-submission after a typo - caught the same
+   way, by actually running the flow rather than assuming it worked.
+
+Also fixed: `admin_client`/`agent_client`/`reviewer_client` test
+fixtures (and several tests calling `/login` or `/logout` directly)
+didn't know about either new requirement - all updated to fetch the
+pre-login token first or supply the logout CSRF token, via a shared
+`_login()` test helper.
+
+4 new tests directly asserting the security property (not just that
+normal login/logout still work): missing pre-login token rejected,
+mismatched pre-login token rejected, missing logout CSRF token
+rejected (422, FastAPI's own required-field validation), wrong logout
+CSRF token rejected (403, this route's own check).
+
+### Test suite
+
+```
+$ python -m pytest -q                                     # SQLite
+186 passed, 5 skipped
+$ TEST_DATABASE_URL=postgresql://... python -m pytest -q  # Postgres
+191 passed
+```
+
+### What's still open
+
+Assignment doesn't verify the target is a real, active, assignable
+user (parses the ID and stops there). Message/customer/KB forms have
+limited server-side bounds on text length. No `TrustedHostMiddleware`.
+The P1 telephony-as-real-conversation-workflow gap, the P2 RAG
+confidence/versioning findings, and the operational-scale items
+(thousand-line files, N+1 queries) remain untouched.
