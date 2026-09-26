@@ -18,7 +18,7 @@
                 <p class="tagline">Support ticket ledger</p>
             </div>
             {% if user %}
-            <div class="user-bar">
+            <nav class="user-bar" aria-label="Main">
                 <span class="user-name">{{ user.name }} <span class="user-role">({{ user.role.value }})</span></span>
                 <a href="/reports" class="user-link">Reports</a>
                 <a href="/kb" class="user-link">Knowledge base</a>
@@ -28,7 +28,7 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button type="submit" class="link-button">Log out</button>
                 </form>
-            </div>
+            </nav>
             {% endif %}
         </header>
         <main>
