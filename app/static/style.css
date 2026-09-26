@@ -711,3 +711,8 @@ tr.is-inactive td { color: var(--ink-muted); }
   .queue-table td.ledger-id { display: inline-block; width: auto; padding-right: 8px; }
   .queue-table td.ledger-desc { display: inline; }
 }
+
+/* Pick list (customer search results) */
+.pick-list { list-style: none; padding: 0; margin: 8px 0; border: 1px solid var(--rule); border-radius: var(--radius); }
+.pick-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; }
+.pick-list li + li { border-top: 1px solid var(--rule); }

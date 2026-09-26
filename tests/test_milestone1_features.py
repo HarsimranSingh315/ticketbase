@@ -393,3 +393,30 @@ def test_ownership_filter_survives_status_tabs_and_search(admin_client):
     page = admin_client.get("/", params={"owner": "mine"}).text
     assert "status=open" in page and "owner=mine" in page
     assert '<input type="hidden" name="owner" value="mine">' in page
+
+
+def test_customer_picker_searches_by_name_and_links(admin_client, db_session):
+    """Replaces the raw numeric 'Customer ID' box (an implementation detail
+    agents shouldn't need to know)."""
+    import re
+    from app import crud
+    target = crud.create_customer(db_session, "Northwind Traders")
+    crud.create_customer(db_session, "Contoso Ltd")
+    t = admin_client.post("/tickets", json={"description": "picker"}).json()
+    page = admin_client.get(f"/ui/tickets/{t['id']}", params={"customer_q": "north"}).text
+    assert "Northwind Traders" in page and "Contoso Ltd" not in page
+    assert 'placeholder="Customer ID"' not in page
+    form = re.search(r'value="(\d+)">\s*<button type="submit" class="btn btn-quiet">Link<span class="visually-hidden"> Northwind', page)
+    assert form and int(form.group(1)) == target.id
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+    r = admin_client.post(f"/ui/tickets/{t['id']}/customer",
+                          data={"customer_id": target.id, "version": t["version"], "csrf_token": csrf}, follow_redirects=False)
+    assert r.status_code == 303
+    db_session.expire_all()
+    assert crud.get_ticket(db_session, t["id"]).customer_id == target.id
+
+
+def test_customer_picker_no_match_offers_creation(admin_client):
+    t = admin_client.post("/tickets", json={"description": "picker"}).json()
+    page = admin_client.get(f"/ui/tickets/{t['id']}", params={"customer_q": "zzz-nobody"}).text
+    assert "No customers match" in page and 'href="/customers"' in page

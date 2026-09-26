@@ -28,20 +28,37 @@
 </section>
 
 <section class="panel">
-    <h2>Customer</h2>
+    <h2 id="customer-heading">Customer</h2>
     {% if customer %}
         <div class="record"><a href="/customers/{{ customer.id }}" style="color: inherit; text-decoration: none;">{{ customer.name }}</a></div>
         <p class="hint">See the customer's full exact ticket history on their page — separate from the semantic "related tickets" below.</p>
     {% else %}
         <p class="no-record">Not linked to a customer</p>
         {% if user.role.value != 'reviewer' %}
-        <form method="post" action="/ui/tickets/{{ ticket.id }}/customer" class="stack-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="version" value="{{ ticket.version }}">
-            <input type="number" name="customer_id" placeholder="Customer ID" required style="width: 110px;">
-            <button type="submit" class="btn btn-quiet">Link</button>
-            <a href="/customers" class="user-link" style="font-size: 13px;">Search customers →</a>
+        <form method="get" action="/ui/tickets/{{ ticket.id }}#customer-heading" class="stack-form" role="search">
+            <label for="customer-search" class="field-label">Find a customer to link</label>
+            <input id="customer-search" type="search" name="customer_q" value="{{ customer_q or '' }}" placeholder="Name, e.g. Northwind" autocomplete="off">
+            <button type="submit" class="btn btn-quiet">Search</button>
         </form>
+        {% if customer_q %}
+            {% if customer_matches %}
+            <ul class="pick-list" aria-label="Matching customers">
+                {% for c in customer_matches %}
+                <li>
+                    <span>{{ c.name }}</span>
+                    <form method="post" action="/ui/tickets/{{ ticket.id }}/customer" class="inline-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="version" value="{{ ticket.version }}">
+                        <input type="hidden" name="customer_id" value="{{ c.id }}">
+                        <button type="submit" class="btn btn-quiet">Link<span class="visually-hidden"> {{ c.name }}</span></button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty-state" role="status">No customers match "{{ customer_q }}". <a href="/customers">Create one on the Customers page →</a></p>
+            {% endif %}
+        {% endif %}
         {% endif %}
     {% endif %}
 </section>

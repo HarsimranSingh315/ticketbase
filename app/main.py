@@ -989,7 +989,7 @@ def ui_create_ticket(request: Request, description: str = Form(...), db: Session
 
 @app.get("/ui/tickets/{ticket_id}")
 def ui_ticket_detail(
-    request: Request, ticket_id: int,
+    request: Request, ticket_id: int, customer_q: Optional[str] = None,
     db: Session = Depends(get_db),
     rag_index: RAGIndex = Depends(get_rag_index),
     user: User = Depends(require_agent),
@@ -1000,10 +1000,13 @@ def ui_ticket_detail(
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
-    return templates.TemplateResponse(
-        request, "ticket_detail.html",
-        _ticket_detail_context(db, ticket, related, user, request, settings),
-    )
+    context = _ticket_detail_context(db, ticket, related, user, request, settings)
+    # Server-rendered customer search (no JS needed, CSP-safe): matches are
+    # listed with a Link button each, replacing the old raw numeric-ID box.
+    q = (customer_q or "").strip()[:100]
+    context["customer_q"] = q
+    context["customer_matches"] = crud.customer_page(db, q=q, page=1, page_size=8).items if q else []
+    return templates.TemplateResponse(request, "ticket_detail.html", context)
 
 
 def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, request: Request, settings: Settings, suggestion=None, conflict_error: Optional[str] = None, submitted_draft: Optional[dict] = None) -> dict:
