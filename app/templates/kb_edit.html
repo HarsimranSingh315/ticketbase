@@ -25,7 +25,7 @@
         <label>Category</label>
         <input type="text" name="category" value="{{ form.category if form else (article.category if article else '') }}" placeholder="e.g. connectivity, billing, hardware" required>
         <label>Content</label>
-        <textarea name="content" rows="10" placeholder="What an agent should know, and what SupportRAG will cite and draft from…" required>{{ form.content if form else (article.content if article else '') }}</textarea>
+        <textarea name="content" rows="10" placeholder="What an agent should know. Suggestions and draft replies are built from this text." required>{{ form.content if form else (article.content if article else '') }}</textarea>
         <div class="message-actions">
             <button type="submit" class="btn">{% if article %}Save changes{% else %}Create article{% endif %}</button>
         </div>
@@ -41,7 +41,7 @@
 {% if article and user.role.value != 'reviewer' %}
 <section class="panel">
     <h2>Delete this article</h2>
-    <p class="hint" style="margin-top: 0;">This removes it from SupportRAG's knowledge base immediately. At least 2 articles must always remain.</p>
+    <p class="hint" style="margin-top: 0;">Suggestions stop using it straight away. At least 2 articles must always remain.</p>
     {# B8: the old inline submit-handler confirm() was silently blocked by our own
        CSP (script-src 'self', no inline handlers), so deletion had NO
        confirmation at all. A required acknowledgement works without JS,

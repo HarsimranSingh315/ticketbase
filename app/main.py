@@ -156,8 +156,8 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "  # fonts are self-hosted: no third party sees visitors' IPs
         "img-src 'self' data:; "
         "object-src 'none'; "
         "base-uri 'self'; "

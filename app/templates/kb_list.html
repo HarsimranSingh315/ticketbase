@@ -13,9 +13,8 @@
         </form>
     </div>
     <p class="hint" style="margin-top: 10px;">
-        SupportRAG suggests ticket categories and drafts responses by retrieving the
-        most similar article here. Adding, editing, or removing an article takes
-        effect immediately — the next suggestion made anywhere in the app uses it.
+        Suggested categories and draft replies are based on the article here that
+        best matches a ticket. Changes take effect for the next suggestion.
     </p>
     {% if user.role.value != 'reviewer' %}
     <a href="/kb/new" class="btn" style="margin-top: 12px; display: inline-block; text-decoration: none;">New article</a>

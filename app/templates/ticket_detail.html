@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Ticket #{{ ticket.id }} — TicketBase{% endblock %}
 
+{% block shell_class %}shell-wide{% endblock %}
+
 {% block content %}
 
 <a href="/" class="back-link">← All tickets</a>
@@ -27,210 +29,8 @@
     </ul>
 </section>
 
-<section class="panel">
-    <h2 id="customer-heading">Customer</h2>
-    {% if customer %}
-        <div class="record"><a href="/customers/{{ customer.id }}" style="color: inherit; text-decoration: none;">{{ customer.name }}</a></div>
-        <p class="hint">See the customer's full exact ticket history on their page — separate from the semantic "related tickets" below.</p>
-    {% else %}
-        <p class="no-record">Not linked to a customer</p>
-        {% if user.role.value != 'reviewer' %}
-        <form method="get" action="/ui/tickets/{{ ticket.id }}#customer-heading" class="stack-form" role="search">
-            <label for="customer-search" class="field-label">Find a customer to link</label>
-            <input id="customer-search" type="search" name="customer_q" value="{{ customer_q or '' }}" placeholder="Name, e.g. Northwind" autocomplete="off">
-            <button type="submit" class="btn btn-quiet">Search</button>
-        </form>
-        {% if customer_q %}
-            {% if customer_matches %}
-            <ul class="pick-list" aria-label="Matching customers">
-                {% for c in customer_matches %}
-                <li>
-                    <span>{{ c.name }}</span>
-                    <form method="post" action="/ui/tickets/{{ ticket.id }}/customer" class="inline-form">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                        <input type="hidden" name="version" value="{{ ticket.version }}">
-                        <input type="hidden" name="customer_id" value="{{ c.id }}">
-                        <button type="submit" class="btn btn-quiet">Link<span class="visually-hidden"> {{ c.name }}</span></button>
-                    </form>
-                </li>
-                {% endfor %}
-            </ul>
-            {% else %}
-            <p class="empty-state" role="status">No customers match "{{ customer_q }}". <a href="/customers">Create one on the Customers page →</a></p>
-            {% endif %}
-        {% endif %}
-        {% endif %}
-    {% endif %}
-</section>
-
-{% if customer %}
-<section class="panel">
-    <h2>Calls</h2>
-    {% set callable_contacts = contacts|selectattr('phone')|list %}
-    {% if callable_contacts %}
-        {% if user.role.value != 'reviewer' %}
-        <div class="message-actions" style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
-        {% for contact in callable_contacts %}
-            <form method="post" action="/ui/tickets/{{ ticket.id }}/call">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="contact_id" value="{{ contact.id }}">
-                <button type="submit" class="btn btn-quiet">Call {{ contact.name }} ({{ contact.phone }})</button>
-            </form>
-        {% endfor %}
-        </div>
-        {% endif %}
-    {% else %}
-        <p class="no-record">No contact with a phone number on file for this customer.</p>
-    {% endif %}
-
-    {% if calls %}
-    <ul class="related-list" style="margin-top: 14px;">
-        {% for call in calls %}
-        <li>
-            <span>{{ call.direction.value|capitalize }} call to/from {{ call.to_number if call.direction.value == 'outbound' else call.from_number }}</span>
-            <span class="related-meta">
-                <span class="tag tag-status-{{ 'resolved' if call.status.value == 'completed' else 'open' }}">{{ call.status.value }}</span>
-                {% if call.duration_seconds %}<span class="sim">{{ call.duration_seconds }}s</span>{% endif %}
-            </span>
-        </li>
-        {% endfor %}
-    </ul>
-    {% endif %}
-</section>
-{% endif %}
-
-{% if user.role.value != 'reviewer' %}
-<section class="panel">
-    <h2 id="assignment-heading">Assignment</h2>
-    <form method="post" action="/ui/tickets/{{ ticket.id }}/assign" class="stack-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="version" value="{{ ticket.version }}">
-        <select name="assignee_id" aria-labelledby="assignment-heading">
-            <option value="">Unassigned</option>
-            {% for agent in agents %}
-            <option value="{{ agent.id }}" {{ 'selected' if assignee and assignee.id == agent.id }}>{{ agent.name }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit" class="btn btn-quiet">Assign</button>
-    </form>
-</section>
-{% endif %}
-
-{% if related_tickets %}
-<section class="panel">
-    <h2>Related tickets</h2>
-    <ul class="related-list">
-        {% for r in related_tickets %}
-        <li>
-            <a href="/ui/tickets/{{ r.id }}">{{ r.description }}</a>
-            <span class="related-meta">
-                <span class="tag tag-status-{{ r.status }}">{{ r.status|replace('_', ' ') }}</span>
-                <span class="sim">{{ (r.similarity * 100)|round|int }}% similar</span>
-            </span>
-        </li>
-        {% endfor %}
-    </ul>
-</section>
-{% endif %}
-
-<section class="panel">
-    <h2 id="priority-heading">Priority</h2>
-    {% if user.role.value != 'reviewer' %}
-    <form method="post" action="/ui/tickets/{{ ticket.id }}/priority" class="stack-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="version" value="{{ ticket.version }}">
-        <select name="priority" aria-labelledby="priority-heading" aria-describedby="priority-hint">
-            {% for p in ['high', 'medium', 'low'] %}<option value="{{ p }}" {{ 'selected' if ticket.priority.value == p }}>{{ p|capitalize }}</option>{% endfor %}
-        </select>
-        <button type="submit" class="btn btn-quiet">Change priority</button>
-    </form>
-    <p id="priority-hint" class="hint">Set automatically from the description when the ticket was logged. Changing it also changes when the ticket is due.</p>
-    {% else %}
-    <p><span class="priority-badge is-{{ ticket.priority.value }}">{{ ticket.priority.value|capitalize }}</span></p>
-    {% endif %}
-</section>
-
-<section class="panel">
-    <h2 id="status-heading">Status</h2>
-    {% if user.role.value != 'reviewer' %}
-    <form method="post" action="/ui/tickets/{{ ticket.id }}/status" class="stack-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="version" value="{{ ticket.version }}">
-        <select name="status" aria-labelledby="status-heading">
-            <option value="open" {{ 'selected' if ticket.status.value == 'open' }}>Open</option>
-            <option value="in_progress" {{ 'selected' if ticket.status.value == 'in_progress' }}>In progress</option>
-            <option value="resolved" {{ 'selected' if ticket.status.value == 'resolved' }}>Resolved</option>
-        </select>
-        <button type="submit" class="btn btn-quiet">Update status</button>
-    </form>
-    {% endif %}
-</section>
-
-<section class="panel">
-    <h2>Category</h2>
-    {% if ticket.category %}
-        <div class="record">{{ ticket.category }}</div>
-    {% else %}
-        <p class="no-record">No category confirmed yet</p>
-    {% endif %}
-    {% if user.role.value != 'reviewer' %}
-    <form method="post" action="/ui/tickets/{{ ticket.id }}/category" class="stack-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="version" value="{{ ticket.version }}">
-        <input type="text" name="category" placeholder="e.g. connectivity, billing, hardware" required>
-        <button type="submit" class="btn btn-quiet">Confirm category</button>
-    </form>
-    <p class="hint">Confirming here does the same thing as the CLI's <code>confirm-category</code> command — and is now recorded in the audit trail below with your name and the time.</p>
-    {% endif %}
-</section>
-
-<section class="panel">
-    <h2>SupportRAG suggestion</h2>
-    <div id="suggestion-container">
-    {% if not suggestion %}
-        <form id="suggest-form" method="post" action="/ui/tickets/{{ ticket.id }}/suggest" data-ticket-id="{{ ticket.id }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn btn-quiet">Suggest a category</button>
-        </form>
-    {% else %}
-        <div class="suggestion-box {{ 'is-abstained' if suggestion.abstained }}">
-            {% if suggestion.abstained %}
-                <span class="suggestion-label">Not confident enough</span>
-                <p style="margin: 0; font-size: 13px; color: var(--ink-muted);">{{ suggestion.draft_response }}</p>
-            {% else %}
-                <span class="suggestion-label">Suggested, not yet confirmed</span>
-                <p class="suggested-category">{{ suggestion.category }}</p>
-                <div class="confidence-row">
-                    <div class="confidence-track">
-                        <div class="confidence-fill" style="width: {{ (suggestion.confidence * 100)|round|int }}%;"></div>
-                    </div>
-                    <span class="confidence-value">{{ (suggestion.confidence * 100)|round|int }}%</span>
-                </div>
-            {% endif %}
-
-            {% if suggestion.sources %}
-            <details class="disclosure">
-                <summary>What this is based on</summary>
-                <ul class="sources-list">
-                {% for s in suggestion.sources %}
-                    <li>{{ s.title }} <span class="sim">({{ (s.similarity * 100)|round|int }}% similar)</span></li>
-                {% endfor %}
-                </ul>
-            </details>
-            {% endif %}
-
-            {% if not suggestion.abstained %}
-            <details class="disclosure">
-                <summary>Drafted response {% if suggestion.draft_source == 'llm' %}(AI-written, grounded in the source above){% else %}(templated from the source above){% endif %}</summary>
-                <pre class="draft-response">{{ suggestion.draft_response }}</pre>
-            </details>
-            {% endif %}
-        </div>
-        <p class="hint">This is a suggestion, not a decision. Use "Confirm category" above to accept it.</p>
-    {% endif %}
-    </div>
-</section>
-
+<div class="ticket-layout">
+<div class="ticket-main">
 <section class="panel" id="conversation" aria-labelledby="conversation-heading">
     <h2 id="conversation-heading">Conversation</h2>
     <p class="hint">Internal notes are visible to your team only and are never sent to the customer.</p>
@@ -333,7 +133,7 @@
                     <button type="submit" class="btn">Approve &amp; send</button>
                 </form>
                 {% endif %}
-                <p class="hint">Approving locks the exact recipient, subject, and body — editing afterward is not possible; you'd start a new draft instead. This binds an authenticated actor and timestamp to the send, per the audit trail below.</p>
+                <p class="hint">Once approved, this exact message is queued to send and can't be edited. To change it later, start a new draft.</p>
                 {% endif %}
             {% else %}
                 {% if message.status.value == 'approved' %}
@@ -385,6 +185,70 @@
     {% endif %}
 </section>
 
+<section class="panel">
+    <h2>Suggested category</h2>
+    <div id="suggestion-container">
+    {% if not suggestion %}
+        <form id="suggest-form" method="post" action="/ui/tickets/{{ ticket.id }}/suggest" data-ticket-id="{{ ticket.id }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-quiet">Suggest a category</button>
+        </form>
+    {% else %}
+        <div class="suggestion-box {{ 'is-abstained' if suggestion.abstained }}">
+            {% if suggestion.abstained %}
+                <span class="suggestion-label">Not confident enough</span>
+                <p style="margin: 0; font-size: 13px; color: var(--ink-muted);">{{ suggestion.draft_response }}</p>
+            {% else %}
+                <span class="suggestion-label">Suggested, not yet confirmed</span>
+                <p class="suggested-category">{{ suggestion.category }}</p>
+                <div class="confidence-row">
+                    <div class="confidence-track">
+                        <div class="confidence-fill" style="width: {{ (suggestion.confidence * 100)|round|int }}%;"></div>
+                    </div>
+                    <span class="confidence-value">{{ (suggestion.confidence * 100)|round|int }}%</span>
+                </div>
+            {% endif %}
+
+            {% if suggestion.sources %}
+            <details class="disclosure">
+                <summary>What this is based on</summary>
+                <ul class="sources-list">
+                {% for s in suggestion.sources %}
+                    <li>{{ s.title }} <span class="sim" title="Text similarity, 0 to 1 - not a probability">score {{ '%.2f'|format(s.similarity) }}</span></li>
+                {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+
+            {% if not suggestion.abstained %}
+            <details class="disclosure">
+                <summary>Drafted response {% if suggestion.draft_source == 'llm' %}(AI-written, grounded in the source above){% else %}(templated from the source above){% endif %}</summary>
+                <pre class="draft-response">{{ suggestion.draft_response }}</pre>
+            </details>
+            {% endif %}
+        </div>
+        <p class="hint">This is a suggestion, not a decision. Use "Confirm category" above to accept it.</p>
+    {% endif %}
+    </div>
+</section>
+
+{% if related_tickets %}
+<section class="panel">
+    <h2>Related tickets</h2>
+    <ul class="related-list">
+        {% for r in related_tickets %}
+        <li>
+            <a href="/ui/tickets/{{ r.id }}">{{ r.description }}</a>
+            <span class="related-meta">
+                <span class="tag tag-status-{{ r.status }}">{{ r.status|replace('_', ' ') }}</span>
+                <span class="sim" title="Text similarity, 0 to 1 - not a probability">score {{ '%.2f'|format(r.similarity) }}</span>
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
 {% if audit_events %}
 <section class="panel">
     <h2>Activity</h2>
@@ -399,5 +263,157 @@
     </ul>
 </section>
 {% endif %}
+</div>
+
+<aside class="ticket-side" aria-label="Ticket details">
+<section class="panel">
+    <h2 id="status-heading">Status</h2>
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/status" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <select name="status" aria-labelledby="status-heading">
+            <option value="open" {{ 'selected' if ticket.status.value == 'open' }}>Open</option>
+            <option value="in_progress" {{ 'selected' if ticket.status.value == 'in_progress' }}>In progress</option>
+            <option value="resolved" {{ 'selected' if ticket.status.value == 'resolved' }}>Resolved</option>
+        </select>
+        <button type="submit" class="btn btn-quiet">Update status</button>
+    </form>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2 id="priority-heading">Priority</h2>
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/priority" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <select name="priority" aria-labelledby="priority-heading" aria-describedby="priority-hint">
+            {% for p in ['high', 'medium', 'low'] %}<option value="{{ p }}" {{ 'selected' if ticket.priority.value == p }}>{{ p|capitalize }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn btn-quiet">Change priority</button>
+    </form>
+    <p id="priority-hint" class="hint">Set automatically from the description when the ticket was logged. Changing it also changes when the ticket is due.</p>
+    {% else %}
+    <p><span class="priority-badge is-{{ ticket.priority.value }}">{{ ticket.priority.value|capitalize }}</span></p>
+    {% endif %}
+</section>
+
+{% if user.role.value != 'reviewer' %}
+<section class="panel">
+    <h2 id="assignment-heading">Assignment</h2>
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/assign" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <select name="assignee_id" aria-labelledby="assignment-heading">
+            <option value="">Unassigned</option>
+            {% for agent in agents %}
+            <option value="{{ agent.id }}" {{ 'selected' if assignee and assignee.id == agent.id }}>{{ agent.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-quiet">Assign</button>
+    </form>
+</section>
+{% endif %}
+
+<section class="panel">
+    <h2 id="customer-heading">Customer</h2>
+    {% if customer %}
+        <div class="record"><a href="/customers/{{ customer.id }}" style="color: inherit; text-decoration: none;">{{ customer.name }}</a></div>
+        <p class="hint">Their full ticket history is on the customer's page. "Related tickets" lists similar-sounding tickets from anyone.</p>
+    {% else %}
+        <p class="no-record">Not linked to a customer</p>
+        {% if user.role.value != 'reviewer' %}
+        <form method="get" action="/ui/tickets/{{ ticket.id }}#customer-heading" class="stack-form" role="search">
+            <label for="customer-search" class="field-label">Find a customer to link</label>
+            <input id="customer-search" type="search" name="customer_q" value="{{ customer_q or '' }}" placeholder="Name, e.g. Northwind" autocomplete="off">
+            <button type="submit" class="btn btn-quiet">Search</button>
+        </form>
+        {% if customer_q %}
+            {% if customer_matches %}
+            <ul class="pick-list" aria-label="Matching customers">
+                {% for c in customer_matches %}
+                <li>
+                    <span>{{ c.name }}</span>
+                    <form method="post" action="/ui/tickets/{{ ticket.id }}/customer" class="inline-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="version" value="{{ ticket.version }}">
+                        <input type="hidden" name="customer_id" value="{{ c.id }}">
+                        <button type="submit" class="btn btn-quiet">Link<span class="visually-hidden"> {{ c.name }}</span></button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty-state" role="status">No customers match "{{ customer_q }}". <a href="/customers">Create one on the Customers page →</a></p>
+            {% endif %}
+        {% endif %}
+        {% endif %}
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Category</h2>
+    {% if ticket.category %}
+        <div class="record">{{ ticket.category }}</div>
+    {% else %}
+        <p class="no-record">No category confirmed yet</p>
+    {% endif %}
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/category" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <label for="category-input" class="field-label">Category</label>
+        <input id="category-input" type="text" name="category" placeholder="e.g. connectivity" required aria-describedby="category-hint">
+        <button type="submit" class="btn btn-quiet">Confirm category</button>
+    </form>
+    <p id="category-hint" class="hint">Pick a short, reusable label so tickets group together in Reports.</p>
+    {% endif %}
+</section>
+
+{% if customer %}
+<section class="panel">
+    <h2>Calls</h2>
+    {% set callable_contacts = contacts|selectattr('phone')|list %}
+    {% if callable_contacts %}
+        {% if user.role.value != 'reviewer' %}
+        <div class="message-actions" style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+        {% for contact in callable_contacts %}
+            {# Two deliberate steps: this places a REAL phone call, so a stray
+               click or tap must not ring a customer. Native <details> needs no
+               JS, is CSP-safe and keyboard-operable. #}
+            <details class="call-confirm">
+                <summary class="btn btn-quiet">Call {{ contact.name }}…</summary>
+                <form method="post" action="/ui/tickets/{{ ticket.id }}/call">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="contact_id" value="{{ contact.id }}">
+                    <p class="hint">This dials {{ contact.phone }} now.</p>
+                    <button type="submit" class="btn">Place call now</button>
+                </form>
+            </details>
+        {% endfor %}
+        </div>
+        {% endif %}
+    {% else %}
+        <p class="no-record">No contact with a phone number on file for this customer.</p>
+    {% endif %}
+
+    {% if calls %}
+    <ul class="related-list" style="margin-top: 14px;">
+        {% for call in calls %}
+        <li>
+            <span>{{ call.direction.value|capitalize }} call to/from {{ call.to_number if call.direction.value == 'outbound' else call.from_number }}</span>
+            <span class="related-meta">
+                <span class="tag tag-status-{{ 'resolved' if call.status.value == 'completed' else 'open' }}">{{ call.status.value }}</span>
+                {% if call.duration_seconds %}<span class="sim">{{ call.duration_seconds }}s</span>{% endif %}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>
+{% endif %}
+</aside>
+</div>
 
 {% endblock %}
