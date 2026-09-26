@@ -90,3 +90,27 @@ Status: `OPEN` / `DONE` / `DECIDED`.
 - Whether external AI drafting may be enabled at all for real customer data,
   and with which provider (the ticket text and a KB excerpt are sent to it).
 - **Confirm by replying** with your choices; no secrets involved.
+
+## H8 - Inbound email and password recovery  `OPEN - decision + setup`
+- **Priority:** P2 (blocks the last Phase 3 items; the app works without them).
+- **Why you:** both need a provider account configured for your domain,
+  DNS records only you can add, and a decision on the sending address.
+- **What it unlocks:**
+  1. Customer replies arriving back on the right ticket (threading, loop
+     protection, sender rules).
+  2. "Forgot password" by email. Until then, the workaround is an admin
+     deactivating and re-inviting the person (new link, new password).
+- **Steps (Resend, which you already use for sending):**
+  1. Verify a domain you own in Resend (Resend -> Domains -> Add). Add the
+     DNS records it shows at your registrar (SPF, DKIM; MX if receiving).
+  2. Decide the support address, e.g. `support@yourdomain`.
+  3. Enable inbound/receiving for that address in Resend if your plan
+     supports it; note whether it delivers inbound mail by webhook.
+  4. Add the webhook signing secret to Render as `RESEND_WEBHOOK_SECRET`
+     (never in chat).
+- **Cost:** a domain if you don't have one (~$10-20/year). Check Resend's
+  current plan limits for inbound; I haven't verified them.
+- **Confirm by replying:** "H8: domain verified = <domain>, inbound = yes/no,
+  webhook secret added". No secrets in the reply.
+- **Blocks:** reply ingestion, password-reset email.
+- **Meanwhile I continue:** Phase 4 UI and Phase 5 AI safety.

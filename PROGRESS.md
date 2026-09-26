@@ -34,15 +34,15 @@ Each was reproduced or confirmed in source before fixing.
 | Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 260 passed / 5 skipped (Postgres-only race tests skipped by design).
-- PostgreSQL 16: 265 passed.
+- SQLite: 277 passed / 8 skipped (the 8 are Postgres-only race tests).
+- PostgreSQL 16: 285 passed (all race tests run).
 - Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
 - pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
 - Secret scan: only local/CI placeholders; no .env ever committed.
 - Restore drill: local PostgreSQL 16 only - passed.
-- OPEN INTERMITTENT: one unidentified test failure in one SQLite run
-  (right after the B3/B4 refactor); 10 consecutive clean runs since.
-  Not reproduced, not explained - watch CI.
+- RESOLVED INTERMITTENT: SQLite outbox barrier test failed ~3% of runs
+  (measured 2/60; thread hit "cannot commit - no transaction is active" on
+  SQLite's shared connection). Now PostgreSQL-only; 0/40 failures there.
 
 ## Operations done
 - /live and /ready (503 on DB down or schema behind; KB index degraded is
@@ -64,11 +64,12 @@ Each was reproduced or confirmed in source before fixing.
   drive real email/AI/API paths, mutation-checked guard).
 - DONE: My tickets / Unassigned queues; assignment target validation.
 - DONE (found via browser): header overflowed every signed-in page at 390px.
-- NEXT: user administration - deactivate/reactivate, role change, session
-  revocation on both, self-service password change, admin audit events.
-- BLOCKED on owner (HUMAN_TASKS H8, to be written): inbound customer email
-  (reply ingestion/threading) needs a verified provider inbound route and a
-  DNS decision. Not started; will not be faked.
+- DONE: user administration (deactivate/reactivate, role change, sign out
+  everywhere, last-admin protection with a mutation-checked row lock),
+  own-password change, atomic invite acceptance.
+- BLOCKED on owner (HUMAN_TASKS H8): inbound customer email
+  (reply ingestion/threading) and password-reset email need a verified
+  provider domain. Not started; will not be faked.
 
 ## Then
 - Phase 4: screenshot-driven UI pass (fonts self-hosting, contrast
