@@ -412,7 +412,7 @@ def get_related_tickets(
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    related = find_related_tickets(ticket.description, candidates)
     return [
         schemas.RelatedTicketOut(id=r.id, description=r.description, status=r.status, similarity=r.similarity)
         for r in related
@@ -999,7 +999,7 @@ def ui_ticket_detail(
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    related = find_related_tickets(ticket.description, candidates)
     context = _ticket_detail_context(db, ticket, related, user, request, settings)
     # Server-rendered customer search (no JS needed, CSP-safe): matches are
     # listed with a Link button each, replacing the old raw numeric-ID box.
@@ -1065,7 +1065,7 @@ def ui_suggest_category(
     rag = SupportRAGService(rag_index, rag_settings)
     suggestion = rag.suggest(ticket.description, ticket_id=ticket_id)
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    related = find_related_tickets(ticket.description, candidates)
     user = get_current_user(request, db)
     return templates.TemplateResponse(
         request, "ticket_detail.html",
@@ -1103,7 +1103,7 @@ def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_inde
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
     candidates = crud.list_other_tickets(db, exclude_id=ticket_id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    related = find_related_tickets(ticket.description, candidates)
     context = _ticket_detail_context(db, ticket, related, user, request, settings, conflict_error=message,
                                      submitted_draft=submitted_draft)
     context["submitted_note"] = submitted_note
@@ -1243,7 +1243,7 @@ def _render_call_error(request: Request, db: Session, ticket, rag_index: RAGInde
     clear, specific error shown on the real current page, not a raw
     500 or a silently-swallowed failure."""
     candidates = crud.list_other_tickets(db, exclude_id=ticket.id)
-    related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
+    related = find_related_tickets(ticket.description, candidates)
     context = _ticket_detail_context(
         db, ticket, related, user, request, settings,
         conflict_error=f"Couldn't place the call: {error_message}",

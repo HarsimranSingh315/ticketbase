@@ -1,0 +1,131 @@
+{
+  "_about": "Hand-labelled ticket pairs for evaluating related-ticket matching. 'related' = an agent would want to see one when handling the other. Kept deliberately varied: paraphrases, different vocabulary for the same problem, topics absent from the knowledge base, and unrelated pairs that share generic words. The final related pair was added after an evaluation miss surfaced in the test suite (recorded so the set's history is honest).",
+  "related": [
+    [
+      "My VPN will not connect after the Windows update",
+      "VPN keeps disconnecting since this morning's update"
+    ],
+    [
+      "Printer on floor 3 shows offline for everyone",
+      "Can't print, the office printer says offline"
+    ],
+    [
+      "I was charged twice for my subscription",
+      "Double charge on my credit card this month"
+    ],
+    [
+      "Forgot my password and the reset email never arrives",
+      "Password reset link not received"
+    ],
+    [
+      "Outlook won't open, crashes on startup",
+      "Outlook crashes every time I start it"
+    ],
+    [
+      "Laptop battery drains in an hour",
+      "Battery on my laptop dies very fast"
+    ],
+    [
+      "Wifi in the meeting room keeps dropping",
+      "Meeting room wifi connection drops constantly"
+    ],
+    [
+      "Teams calls have no audio",
+      "No sound during Microsoft Teams meetings"
+    ],
+    [
+      "Invoice shows the wrong billing address",
+      "Wrong address printed on my invoice"
+    ],
+    [
+      "Account locked after too many login attempts",
+      "Locked out of my account, too many failed logins"
+    ],
+    [
+      "Monitor flickers when connected to the docking station",
+      "Screen flickering through the dock"
+    ],
+    [
+      "Refund not received for cancelled order",
+      "Still waiting on refund for the order I cancelled"
+    ],
+    [
+      "Shared drive is very slow to open files",
+      "Opening files on the shared drive takes forever"
+    ],
+    [
+      "Two-factor code never arrives by SMS",
+      "Not getting my 2FA text message"
+    ],
+    [
+      "My VPN will not connect from home",
+      "VPN keeps disconnecting, cannot reach the office network"
+    ]
+  ],
+  "unrelated": [
+    [
+      "My VPN will not connect after the Windows update this morning",
+      "Printer on floor 3 shows offline for everyone"
+    ],
+    [
+      "I was charged twice for my subscription",
+      "Laptop battery drains in an hour"
+    ],
+    [
+      "Forgot my password and the reset email never arrives",
+      "Printer on floor 3 shows offline for everyone"
+    ],
+    [
+      "Outlook won't open, crashes on startup",
+      "I was charged twice for my subscription"
+    ],
+    [
+      "Laptop battery drains in an hour",
+      "My VPN will not connect after the Windows update"
+    ],
+    [
+      "Need a new monitor for my desk",
+      "Password reset link not received"
+    ],
+    [
+      "Wifi in the meeting room keeps dropping",
+      "Invoice shows the wrong billing address"
+    ],
+    [
+      "Teams calls have no audio",
+      "Refund not received for cancelled order"
+    ],
+    [
+      "Account locked after too many login attempts",
+      "Shared drive is very slow to open files"
+    ],
+    [
+      "Monitor flickers when connected to the docking station",
+      "Two-factor code never arrives by SMS"
+    ],
+    [
+      "Printer is out of toner",
+      "Printer on floor 3 shows offline for everyone"
+    ],
+    [
+      "Please update my phone number on file",
+      "VPN keeps disconnecting since this morning's update"
+    ],
+    [
+      "The office is too cold this morning",
+      "My VPN will not connect after the Windows update this morning"
+    ],
+    [
+      "Order arrived damaged",
+      "Double charge on my credit card this month"
+    ],
+    [
+      "Can I get access to the finance folder",
+      "Shared drive is very slow to open files"
+    ],
+    [
+      "New starter needs a laptop",
+      "Laptop battery drains in an hour"
+    ]
+  ]
+}
