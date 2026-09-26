@@ -31,7 +31,9 @@
     {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets" class="log-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <textarea name="description" rows="2" placeholder="Describe the issue…" required>{{ submitted_description or '' }}</textarea>
+        <label for="new-ticket" class="field-label">New ticket</label>
+        <textarea id="new-ticket" name="description" rows="2" placeholder="What's the problem? e.g. VPN won't connect after today's update" required aria-describedby="new-ticket-hint">{{ submitted_description or '' }}</textarea>
+        <p id="new-ticket-hint" class="hint">Priority is set automatically from the description; you can change it later.</p>
         <button type="submit" class="btn">Log ticket</button>
     </form>
     {% else %}
@@ -63,28 +65,36 @@
     </div>
 
     {% if tickets %}
-        <table class="ledger">
+        <table class="ledger queue-table">
+            <caption class="visually-hidden">Tickets{% if current_owner == 'mine' %} assigned to you{% elif current_owner == 'unassigned' %} with no owner{% endif %}</caption>
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Ticket</th>
+                    <th scope="col">Owner</th>
+                    <th scope="col">Priority</th>
+                    <th scope="col">Status</th>
+                    <th scope="col"><abbr title="Time since the ticket was opened">Age</abbr></th>
+                </tr>
+            </thead>
             <tbody>
                 {% for t in tickets %}
                 <tr>
-                    <td class="ledger-id">
-                        <span class="priority-tick {{ t.priority.value }}"></span>
-                        #{{ t.id }}
-                    </td>
+                    <td class="ledger-id">#{{ t.id }}</td>
                     <td class="ledger-desc">
                         <a href="/ui/tickets/{{ t.id }}">{{ t.description }}</a>
+                        <span class="row-sub">
+                            {% if t.customer_id and customer_names.get(t.customer_id) %}{{ customer_names[t.customer_id] }}{% endif %}
+                            {% if t.category %}{{ ' · ' if t.customer_id else '' }}{{ t.category }}{% endif %}
+                        </span>
                     </td>
-                    <td class="ledger-meta">
-                        {% if t.category %}
-                            {{ t.category }}
-                        {% else %}
-                            <span style="color: var(--ink-faint);">no category</span>
-                        {% endif %}
-                    </td>
-                    <td class="ledger-meta">
+                    <td class="ledger-meta" data-label="Owner">{{ owner_names.get(t.assignee_id, 'Unassigned') if t.assignee_id else 'Unassigned' }}</td>
+                    <td class="ledger-meta" data-label="Priority"><span class="priority-badge is-{{ t.priority.value }}">{{ t.priority.value|capitalize }}</span></td>
+                    <td class="ledger-meta" data-label="Status">
                         <span class="tag tag-status-{{ t.status.value }}">{{ t.status.value|replace('_', ' ') }}</span>
                         {% if t.id in breached_ids %}<span class="tag tag-breached">Overdue</span>{% endif %}
                     </td>
+                    <td class="ledger-meta" data-label="Age"><time datetime="{{ t.created_at.isoformat() if t.created_at }}">{{ t.created_at|age }}</time></td>
                 </tr>
                 {% endfor %}
             </tbody>

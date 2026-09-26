@@ -84,11 +84,11 @@
 
 {% if user.role.value != 'reviewer' %}
 <section class="panel">
-    <h2>Assignment</h2>
+    <h2 id="assignment-heading">Assignment</h2>
     <form method="post" action="/ui/tickets/{{ ticket.id }}/assign" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="version" value="{{ ticket.version }}">
-        <select name="assignee_id">
+        <select name="assignee_id" aria-labelledby="assignment-heading">
             <option value="">Unassigned</option>
             {% for agent in agents %}
             <option value="{{ agent.id }}" {{ 'selected' if assignee and assignee.id == agent.id }}>{{ agent.name }}</option>
@@ -117,12 +117,29 @@
 {% endif %}
 
 <section class="panel">
-    <h2>Status</h2>
+    <h2 id="priority-heading">Priority</h2>
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/priority" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="version" value="{{ ticket.version }}">
+        <select name="priority" aria-labelledby="priority-heading" aria-describedby="priority-hint">
+            {% for p in ['high', 'medium', 'low'] %}<option value="{{ p }}" {{ 'selected' if ticket.priority.value == p }}>{{ p|capitalize }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn btn-quiet">Change priority</button>
+    </form>
+    <p id="priority-hint" class="hint">Set automatically from the description when the ticket was logged. Changing it also changes when the ticket is due.</p>
+    {% else %}
+    <p><span class="priority-badge is-{{ ticket.priority.value }}">{{ ticket.priority.value|capitalize }}</span></p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2 id="status-heading">Status</h2>
     {% if user.role.value != 'reviewer' %}
     <form method="post" action="/ui/tickets/{{ ticket.id }}/status" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="version" value="{{ ticket.version }}">
-        <select name="status">
+        <select name="status" aria-labelledby="status-heading">
             <option value="open" {{ 'selected' if ticket.status.value == 'open' }}>Open</option>
             <option value="in_progress" {{ 'selected' if ticket.status.value == 'in_progress' }}>In progress</option>
             <option value="resolved" {{ 'selected' if ticket.status.value == 'resolved' }}>Resolved</option>

@@ -10,7 +10,15 @@
     --paper-raised: #F7F8F4;
     --ink: #1C2420;
     --ink-muted: #5C665C;
-    --ink-faint: #8B948A;
+    /* Text greys. --ink-faint was #8B948A: 2.75:1 on --paper, failing WCAG
+       AA (4.5:1) on every page (axe-core, 22/22 page views). #616760 is the
+       lightest same-hue shade passing on EVERY background token (worst
+       4.66:1 on --brick-bg). It sits close to --ink-muted: WCAG leaves room
+       for only two readable greys on these backgrounds, so hierarchy now
+       comes from size/weight rather than paleness. */
+    --ink-faint: #616760;
+    /* Decorative borders only (not text) keep the original lighter shade. */
+    --line-faint: #8B948A;
     --rule: #CBD2C7;
     --rule-strong: #A8B2A2;
 
@@ -540,11 +548,11 @@ textarea:focus-visible, select:focus-visible {
     to { opacity: 1; transform: translateY(0); }
 }
 .suggestion-box.is-abstained {
-    border-color: var(--ink-faint);
+    border-color: var(--line-faint);
     background: var(--paper-raised);
 }
 .suggestion-box.is-loading {
-    border-color: var(--ink-faint);
+    border-color: var(--line-faint);
     background: var(--paper-raised);
     animation: suggestion-pulse 1.4s ease-in-out infinite;
 }
@@ -564,7 +572,7 @@ textarea:focus-visible, select:focus-visible {
 }
 .suggestion-label::before { content: "?"; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border: 1px solid var(--ochre); border-radius: 50%; font-size: 10px; }
 .is-abstained .suggestion-label { color: var(--ink-muted); }
-.is-abstained .suggestion-label::before { border-color: var(--ink-faint); content: "—"; }
+.is-abstained .suggestion-label::before { border-color: var(--line-faint); content: "—"; }
 
 .suggested-category { font-size: 16px; font-weight: 600; color: var(--ink); margin: 0 0 10px; }
 
@@ -681,3 +689,25 @@ details.disclosure summary {
 .row-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 tr.is-inactive td { color: var(--ink-muted); }
 .panel.narrow { max-width: 32rem; }
+
+/* Queue table: priority as TEXT + shape, never colour alone (a colour-only
+   tick previously carried priority with no text equivalent). */
+.queue-table thead th { text-align: left; font-size: 12px; font-weight: 600; color: var(--ink-muted); padding: 6px 8px; border-bottom: 1px solid var(--rule-strong); }
+.queue-table td { padding: 10px 8px; vertical-align: top; }
+.row-sub { display: block; font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+.priority-badge { font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; white-space: nowrap; }
+.priority-badge.is-high { color: var(--brick); background: var(--brick-bg); }
+.priority-badge.is-high::before { content: "▲ "; }
+.priority-badge.is-medium { color: var(--ochre); background: var(--ochre-bg); }
+.priority-badge.is-low { color: var(--ink-muted); }
+@media (max-width: 700px) {
+  .queue-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .queue-table td[data-label] { display: inline-block; width: auto; padding: 2px 10px 2px 0; }
+  .queue-table td[data-label]::before { content: attr(data-label) ": "; color: var(--ink-muted); font-size: 11px; }
+}
+.field-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+@media (max-width: 700px) {
+  .queue-table td.ledger-id, .queue-table td.ledger-desc { padding-left: 0; }
+  .queue-table td.ledger-id { display: inline-block; width: auto; padding-right: 8px; }
+  .queue-table td.ledger-desc { display: inline; }
+}

@@ -1711,3 +1711,32 @@ def accept_invite(db: Session, raw_token: str, name: str, password: str) -> User
     db.commit()
     db.refresh(user)
     return user
+
+
+def names_for_ticket_rows(db: Session, tickets: list) -> tuple[dict, dict]:
+    """Owner and customer names for a page of tickets in TWO queries total,
+    not one per row (the review's N+1 concern for list pages)."""
+    owner_ids = {t.assignee_id for t in tickets if t.assignee_id}
+    customer_ids = {t.customer_id for t in tickets if t.customer_id}
+    owners = {u.id: u.name for u in db.query(User).filter(User.id.in_(owner_ids)).all()} if owner_ids else {}
+    customers = ({c.id: c.name for c in db.query(Customer).filter(Customer.id.in_(customer_ids)).all()}
+                 if customer_ids else {})
+    return owners, customers
+
+
+def set_priority(db: Session, ticket_id: int, priority: str, expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
+    """Agent override of the automatic, keyword-based priority. Same
+    compare-and-swap + audit path as every other ticket write."""
+    allowed = [p.value for p in models.TicketPriority]
+    if priority not in allowed:
+        raise ValidationError("priority", f"must be one of: {', '.join(allowed)}")
+    current = get_ticket(db, ticket_id)
+    if current is None:
+        return None
+    old = current.priority.value if hasattr(current.priority, "value") else current.priority
+    return _atomic_ticket_update(
+        db, ticket_id, expected_version,
+        changes={"priority": priority, "version": models.Ticket.version + 1},
+        actor_user_id=actor_user_id, action="ticket.priority_changed",
+        audit_details={"from": old, "to": priority},
+    )

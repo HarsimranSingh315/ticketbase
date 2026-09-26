@@ -165,3 +165,44 @@ def test_ticket_detail_shows_no_sla_line_when_resolved(admin_client):
 
     detail = admin_client.get(f"/ui/tickets/{ticket['id']}")
     assert "SLA deadline" not in detail.text
+
+
+def _set_priority(client, db_session, ticket_id, value):
+    from app import crud
+    from tests.conftest import get_csrf_token
+    db_session.expire_all()
+    v = crud.get_ticket(db_session, ticket_id).version
+    csrf = get_csrf_token(client, f"/ui/tickets/{ticket_id}")
+    return client.post(f"/ui/tickets/{ticket_id}/priority", data={"priority": value, "version": v, "csrf_token": csrf},
+                       follow_redirects=False)
+
+
+def test_agent_can_override_automatic_priority_and_sla_deadline_follows(agent_client, db_session):
+    """The UI hint claims changing priority changes the SLA deadline - proven here, not assumed."""
+    from app import crud
+    from app.models import AuditEvent
+    t = agent_client.post("/tickets", json={"description": "printer is a bit slow"}).json()
+    hours = {"high": 4, "medium": 24, "low": 72}
+    before = crud.compute_sla_deadline(crud.get_ticket(db_session, t["id"]), hours)
+    assert _set_priority(agent_client, db_session, t["id"], "high").status_code == 303
+    db_session.expire_all()
+    ticket = crud.get_ticket(db_session, t["id"])
+    assert ticket.priority.value == "high"
+    assert crud.compute_sla_deadline(ticket, hours) < before
+    ev = db_session.query(AuditEvent).filter(AuditEvent.action == "ticket.priority_changed").one()
+    assert '"to": "high"' in ev.details
+
+
+def test_invalid_priority_rejected(agent_client, db_session):
+    from app import crud
+    t = agent_client.post("/tickets", json={"description": "x"}).json()
+    original = crud.get_ticket(db_session, t["id"]).priority.value
+    assert _set_priority(agent_client, db_session, t["id"], "critical").status_code == 422
+    db_session.expire_all()
+    assert crud.get_ticket(db_session, t["id"]).priority.value == original
+
+
+def test_reviewer_cannot_change_priority(reviewer_client, db_session):
+    from app import crud
+    t = crud.create_ticket(db_session, "x")
+    assert _set_priority(reviewer_client, db_session, t.id, "high").status_code == 403

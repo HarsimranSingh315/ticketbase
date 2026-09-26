@@ -192,6 +192,20 @@ def _global_template_context(request: Request) -> dict:
 templates = Jinja2Templates(directory="app/templates", context_processors=[_global_template_context])
 
 
+def _age(dt) -> str:
+    """Compact, sortable-at-a-glance age for queue rows: 5m, 3h, 2d, 6w."""
+    if dt is None:
+        return ""
+    secs = max(0, int((crud._utcnow() - dt).total_seconds()))  # same naive-UTC clock the DB values use
+    for unit, size in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return "now"
+
+
+templates.env.filters["age"] = _age
+
+
 @app.exception_handler(AuthRedirect)
 async def auth_redirect_handler(request: Request, exc: AuthRedirect):
     return RedirectResponse(url=f"/login?next={exc.next_path}", status_code=303)
@@ -921,6 +935,7 @@ def ui_index(
                                  owner=owner, user_id=user.id)
         breached_ids = {t.id for t in crud.list_breached_tickets(db, sla_hours)}
     tickets = pager.items
+    row_names = crud.names_for_ticket_rows(db, tickets)
 
     stats = crud.get_ticket_stats(db)
     return templates.TemplateResponse(
@@ -928,6 +943,7 @@ def ui_index(
         {
             "tickets": tickets, "current_status": status, "current_q": q, "current_sla": sla,
             "stats": stats, "breached_ids": breached_ids, "pager": pager, **_pager_links(request, pager),
+            "owner_names": row_names[0], "customer_names": row_names[1],
             "current_owner": owner if owner in ("mine", "unassigned") else None,
             "queue_counts": crud.queue_counts(db, user.id),
             "owner_urls": {
@@ -1238,6 +1254,23 @@ def _render_call_error(request: Request, db: Session, ticket, rag_index: RAGInde
 # Same shape as every other ticket write: admin/agent only, CSRF-
 # protected, version-checked. Approval additionally snapshots the
 # content and enqueues the outbox job - see crud.approve_message.
+
+@app.post("/ui/tickets/{ticket_id}/priority", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
+def ui_set_priority(
+    request: Request, ticket_id: int, priority: str = Form(...), version: int = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    try:
+        ticket = crud.set_priority(db, ticket_id, priority, expected_version=version, actor_user_id=user.id)
+    except InputValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't change priority - {e.message}.")
+    except crud.VersionConflict:
+        return _render_conflict(request, db, ticket_id, rag_index, user, settings)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}", status_code=303)
+
 
 @app.post("/ui/tickets/{ticket_id}/notes", dependencies=[Depends(require_csrf)])
 def ui_add_note(
