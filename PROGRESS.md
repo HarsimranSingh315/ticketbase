@@ -34,8 +34,8 @@ Each was reproduced or confirmed in source before fixing.
 | Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 282 passed / 8 skipped (the 8 are Postgres-only race tests).
-- PostgreSQL 16: 290 passed (all race tests run).
+- SQLite: 300 passed / 8 skipped / 1 xfailed (known limitation).
+- PostgreSQL 16: 308 passed / 1 xfailed.
 - Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
 - pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
 - Secret scan: only local/CI placeholders; no .env ever committed.
@@ -85,10 +85,22 @@ Each was reproduced or confirmed in source before fixing.
   no dark mode (deliberately deferred - not in the brief's required list);
   toast notifications/keyboard shortcuts deferred (full-page reloads remain).
 
+## Phase 5 status (AI and knowledge safety)
+- Related tickets rebuilt on a labelled eval set (tests/eval/related_pairs.json):
+  old method wrongly matched 5/16 unrelated pairs at 0.30; new 0/16, finds
+  10/15. Known paraphrase limitation recorded as a strict xfail.
+- Prompt injection: fencing + bounded inputs + output validation (links,
+  emails, phones not in the source article -> draft rejected) + human approval.
+  Mocked-provider evaluation, mutation-checked. Real-model susceptibility NOT
+  measured (needs live calls - owner decision).
+- docs/AI_DATA.md: exactly what leaves the system, when, and how to turn it off.
+- Already covered earlier: KB revisioning and validated publish (B3/B4), source
+  links, similarity labelled as a score, abstention, timeouts and rate limits.
+
 ## Next
-- Phase 5: AI safety - retrieval quality (a printer ticket matched a VPN
-  ticket at 0.56), prompt-injection handling, eval set, provider data docs.
-- Phase 6: release verification, checklist, final recommendation.
+- Phase 6: release verification - release checklist with passed / failed /
+  blocked / not-tested, change summary, remaining risks, startup and
+  verification commands, evidence-based recommendation.
 
 ## Human tasks
 See `HUMAN_TASKS.md`. H1 and H2 block the next deploy.
