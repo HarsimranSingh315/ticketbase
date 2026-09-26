@@ -1472,3 +1472,44 @@ def customer_ticket_page(db: Session, customer_id: int, page: int = 1, page_size
              .filter(models.Ticket.customer_id == customer_id)
              .order_by(models.Ticket.created_at.desc(), models.Ticket.id.desc()))
     return paginate(query, page, page_size)
+
+
+def create_note(db: Session, ticket_id: int, author_user_id: int, body: str) -> models.TicketNote:
+    """Adds an INTERNAL note (see models.TicketNote for why the boundary is
+    structural). The audit event records that a note was added and by whom,
+    deliberately not its text."""
+    body = clean_text(body, "note", MAX_BODY)
+    if get_ticket(db, ticket_id) is None:
+        raise ValueError(f"Ticket {ticket_id} not found")
+    note = models.TicketNote(ticket_id=ticket_id, author_user_id=author_user_id, body=body)
+    db.add(note)
+    db.flush()
+    _record_audit_event(db, author_user_id, "ticket.note_added", "ticket", ticket_id, details={"note_id": note.id})
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+def list_notes_for_ticket(db: Session, ticket_id: int) -> list:
+    return (db.query(models.TicketNote)
+            .filter(models.TicketNote.ticket_id == ticket_id)
+            .order_by(models.TicketNote.created_at.asc(), models.TicketNote.id.asc())
+            .all())
+
+
+def ticket_conversation(db: Session, ticket_id: int) -> list[dict]:
+    """
+    One chronological conversation for the ticket page: internal notes,
+    customer emails and calls, each tagged with an explicit `visibility`
+    ("internal" or "customer") so the template never has to infer it.
+    System events (status changes etc.) stay in the separate audit trail.
+    """
+    items = []
+    for n in list_notes_for_ticket(db, ticket_id):
+        items.append({"kind": "note", "visibility": "internal", "at": n.created_at, "obj": n})
+    for m in list_messages_for_ticket(db, ticket_id):
+        items.append({"kind": "email", "visibility": "customer", "at": m.created_at, "obj": m})
+    for c in db.query(models.Call).filter(models.Call.ticket_id == ticket_id).all():
+        items.append({"kind": "call", "visibility": "customer", "at": c.created_at, "obj": c})
+    items.sort(key=lambda i: (i["at"] or _utcnow(), i["kind"]))
+    return items

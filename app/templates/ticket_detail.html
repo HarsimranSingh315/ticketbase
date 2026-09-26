@@ -197,6 +197,52 @@
     </div>
 </section>
 
+<section class="panel" id="conversation" aria-labelledby="conversation-heading">
+    <h2 id="conversation-heading">Conversation</h2>
+    <p class="hint">Internal notes are visible to your team only and are never sent to the customer.</p>
+    {% if conversation %}
+    <ol class="timeline">
+        {% for item in conversation %}
+        <li class="timeline-item is-{{ item.visibility }}">
+            {% if item.kind == 'note' %}
+                {% set author = audit_actors.get(item.obj.author_user_id) %}
+                <div class="timeline-meta">
+                    <span class="visibility-badge is-internal">Internal note</span>
+                    <span>{{ author.name if author else 'Former user' }}</span>
+                    <time datetime="{{ item.at.isoformat() }}">{{ item.at.strftime('%b %d, %H:%M') }} UTC</time>
+                </div>
+                <div class="timeline-body">{{ item.obj.body }}</div>
+            {% elif item.kind == 'email' %}
+                <div class="timeline-meta">
+                    <span class="visibility-badge is-customer">Email to customer</span>
+                    <span>{{ item.obj.status.value|replace('_', ' ') }}</span>
+                    <time datetime="{{ item.at.isoformat() }}">{{ item.at.strftime('%b %d, %H:%M') }} UTC</time>
+                </div>
+                <div class="timeline-body"><b>{{ item.obj.approved_subject or item.obj.subject }}</b> - to {{ item.obj.approved_recipient_email or item.obj.recipient_email }}</div>
+            {% elif item.kind == 'call' %}
+                <div class="timeline-meta">
+                    <span class="visibility-badge is-customer">Call</span>
+                    <span>{{ item.obj.direction.value }} · {{ item.obj.status.value }}</span>
+                    <time datetime="{{ item.at.isoformat() }}">{{ item.at.strftime('%b %d, %H:%M') }} UTC</time>
+                </div>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty-state">No notes, emails or calls on this ticket yet.</p>
+    {% endif %}
+
+    {% if user.role.value != 'reviewer' %}
+    <form method="post" action="/ui/tickets/{{ ticket.id }}/notes" class="note-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="note-body">Add an internal note <span class="hint">(team only - never sent)</span></label>
+        <textarea id="note-body" name="body" rows="3" required>{{ submitted_note or '' }}</textarea>
+        <button type="submit" class="btn btn-quiet">Add internal note</button>
+    </form>
+    {% endif %}
+</section>
+
 <section class="panel">
     <h2>Email to customer</h2>
     {% for message in messages %}

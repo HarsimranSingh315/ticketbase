@@ -465,3 +465,24 @@ class KnowledgeBaseState(Base):
 
     id = Column(Integer, primary_key=True)
     revision = Column(Integer, nullable=False, default=0)
+
+
+class TicketNote(Base):
+    """
+    An INTERNAL note on a ticket: agent-to-agent context, never shown to or
+    sent to a customer.
+
+    The public/internal boundary is structural, not a flag: notes live in
+    their own table, and nothing on the customer-facing path (OutboundMessage,
+    OutboxJob, app/mail.py, worker.py) or the external-AI path (app/llm.py)
+    reads from it. There is no `is_public` column to set wrongly. Tests in
+    tests/test_notes.py assert this boundary directly, including a static
+    check that those modules never reference this model.
+    """
+    __tablename__ = "ticket_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+    author_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)

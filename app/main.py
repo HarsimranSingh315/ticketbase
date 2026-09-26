@@ -930,12 +930,20 @@ def _ticket_detail_context(db: Session, ticket, related_tickets, user: User, req
     sla_deadline = crud.compute_sla_deadline(ticket, sla_hours)
     sla_breached = crud.is_ticket_breached(ticket, sla_hours)
     calls = crud.list_calls_for_ticket(db, ticket.id)
+    conversation = crud.ticket_conversation(db, ticket.id)
+    for item in conversation:
+        author_id = getattr(item["obj"], "author_user_id", None)
+        if author_id and author_id not in audit_actors:
+            author = crud.get_user(db, author_id)
+            if author:
+                audit_actors[author.id] = author
     return {
         "ticket": ticket, "related_tickets": related_tickets, "user": user,
         "csrf_token": csrf_token_for_template(request, settings),
         "customer": customer, "contacts": contacts, "assignee": assignee, "agents": agents,
         "audit_events": audit_events, "audit_actors": audit_actors,
         "suggestion": suggestion, "conflict_error": conflict_error, "submitted_draft": submitted_draft,
+        "conversation": conversation, "submitted_note": None,
         "messages": messages, "message_jobs": message_jobs,
         "sla_deadline": sla_deadline, "sla_breached": sla_breached,
         "calls": calls,
@@ -987,7 +995,7 @@ def _render_conflict(request: Request, db: Session, ticket_id: int, rag_index: R
 
 def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_index: RAGIndex, user: User,
                          settings: Settings, message: str, status_code: int = 422,
-                         submitted_draft: Optional[dict] = None):
+                         submitted_draft: Optional[dict] = None, submitted_note: Optional[str] = None):
     """Re-renders the ticket page with a visible error instead of a bare
     error response, so the agent stays in context."""
     ticket = crud.get_ticket(db, ticket_id)
@@ -997,6 +1005,7 @@ def _render_ticket_error(request: Request, db: Session, ticket_id: int, rag_inde
     related = find_related_tickets(rag_index.embedder, ticket.description, candidates)
     context = _ticket_detail_context(db, ticket, related, user, request, settings, conflict_error=message,
                                      submitted_draft=submitted_draft)
+    context["submitted_note"] = submitted_note
     return templates.TemplateResponse(request, "ticket_detail.html", context, status_code=status_code)
 
 
@@ -1142,6 +1151,24 @@ def _render_call_error(request: Request, db: Session, ticket, rag_index: RAGInde
 # Same shape as every other ticket write: admin/agent only, CSRF-
 # protected, version-checked. Approval additionally snapshots the
 # content and enqueues the outbox job - see crud.approve_message.
+
+@app.post("/ui/tickets/{ticket_id}/notes", dependencies=[Depends(require_csrf)])
+def ui_add_note(
+    request: Request, ticket_id: int, body: str = Form(...),
+    db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin, UserRole.agent)),
+    rag_index: RAGIndex = Depends(get_rag_index), settings: Settings = Depends(get_settings),
+):
+    """Internal note - visible to agents only, never sent to a customer
+    (see models.TicketNote). Reviewers are read-only and can't add notes."""
+    if crud.get_ticket(db, ticket_id) is None:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+    try:
+        crud.create_note(db, ticket_id, user.id, body)
+    except InputValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings,
+                                    f"Note not saved - {e.message}.", submitted_note=body)
+    return RedirectResponse(url=f"/ui/tickets/{ticket_id}#conversation", status_code=303)
+
 
 @app.post("/ui/tickets/{ticket_id}/messages", dependencies=[Depends(require_role(UserRole.admin, UserRole.agent)), Depends(require_csrf)])
 def ui_create_draft_message(
