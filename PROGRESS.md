@@ -34,8 +34,8 @@ Each was reproduced or confirmed in source before fixing.
 | Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 242 passed / 5 skipped (Postgres-only race tests skipped by design).
-- PostgreSQL 16: 239 passed.
+- SQLite: 260 passed / 5 skipped (Postgres-only race tests skipped by design).
+- PostgreSQL 16: 265 passed.
 - Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
 - pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
 - Secret scan: only local/CI placeholders; no .env ever committed.
@@ -59,12 +59,21 @@ Each was reproduced or confirmed in source before fixing.
 - Corrected claim: a suggestion screenshot looked faded; it was captured
   mid fade-in animation (opacity 1 once settled). Not a defect.
 
-## Next up
-1. Phase 3: internal notes + unified timeline (with public/internal boundary
-   tests), My Tickets / Unassigned views, user admin (deactivate, role
-   change, revoke sessions, password change).
-2. Phase 4: screenshot-driven UI pass at desktop and mobile widths.
-3. Phase 5: AI safety (prompt-injection handling, eval set, provider docs).
+## Phase 3 status
+- DONE: internal notes + conversation timeline (structural boundary, tests
+  drive real email/AI/API paths, mutation-checked guard).
+- DONE: My tickets / Unassigned queues; assignment target validation.
+- DONE (found via browser): header overflowed every signed-in page at 390px.
+- NEXT: user administration - deactivate/reactivate, role change, session
+  revocation on both, self-service password change, admin audit events.
+- BLOCKED on owner (HUMAN_TASKS H8, to be written): inbound customer email
+  (reply ingestion/threading) needs a verified provider inbound route and a
+  DNS decision. Not started; will not be faked.
+
+## Then
+- Phase 4: screenshot-driven UI pass (fonts self-hosting, contrast
+  measurement, searchable customer picker).
+- Phase 5: AI safety (prompt-injection handling, eval set, provider docs).
 
 ## Human tasks
 See `HUMAN_TASKS.md`. H1 and H2 block the next deploy.
