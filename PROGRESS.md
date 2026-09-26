@@ -34,8 +34,8 @@ Each was reproduced or confirmed in source before fixing.
 | Login timing (unknown user) | FIXED | bd935e4 | verification-count test |
 
 ## Latest verified test results
-- SQLite: 277 passed / 8 skipped (the 8 are Postgres-only race tests).
-- PostgreSQL 16: 285 passed (all race tests run).
+- SQLite: 282 passed / 8 skipped (the 8 are Postgres-only race tests).
+- PostgreSQL 16: 290 passed (all race tests run).
 - Fresh venv from lock files: 227 passed (before B3/B4 tests were added).
 - pip-audit (runtime lock): no known vulnerabilities, 2026-09-25.
 - Secret scan: only local/CI placeholders; no .env ever committed.
@@ -71,10 +71,24 @@ Each was reproduced or confirmed in source before fixing.
   (reply ingestion/threading) and password-reset email need a verified
   provider domain. Not started; will not be faked.
 
-## Then
-- Phase 4: screenshot-driven UI pass (fonts self-hosting, contrast
-  measurement, searchable customer picker).
-- Phase 5: AI safety (prompt-injection handling, eval set, provider docs).
+## Phase 4 status (UI/UX)
+- Tooling: axe-core 4.13 (WCAG 2.1 A/AA) + headless Chromium; scripts in
+  tests/browser/. Automated checks cover only part of WCAG - evidence, not a
+  compliance claim.
+- Baseline: contrast failed on 22/22 page views (one token, 2.75:1); 2
+  critical unlabelled selects. Now: 0 violations on all 22.
+- Done: triage queue table (text priority, owner, customer, age), priority
+  override, searchable customer picker (keyboard-verified), self-hosted fonts
+  (0 third-party requests), conversation-first ticket page, two-step call,
+  plain-language copy.
+- Not done / honest gaps: no screen-reader test with a real AT (NVDA/VoiceOver);
+  no dark mode (deliberately deferred - not in the brief's required list);
+  toast notifications/keyboard shortcuts deferred (full-page reloads remain).
+
+## Next
+- Phase 5: AI safety - retrieval quality (a printer ticket matched a VPN
+  ticket at 0.56), prompt-injection handling, eval set, provider data docs.
+- Phase 6: release verification, checklist, final recommendation.
 
 ## Human tasks
 See `HUMAN_TASKS.md`. H1 and H2 block the next deploy.
