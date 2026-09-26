@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Users — TicketBase{% endblock %}
+{% block content %}
+<a href="/" class="back-link">← All tickets</a>
+<section class="panel" aria-labelledby="users-heading">
+    <h1 id="users-heading" class="page-title">Users</h1>
+    {% if message %}<div class="success-banner" role="status">{{ message }}</div>{% endif %}
+    {% if error %}<div class="error-banner" role="alert">{{ error }}</div>{% endif %}
+    <p class="hint">Deactivating someone signs them out everywhere and returns their open tickets to Unassigned.
+       Changing a role signs them out so the new permissions apply immediately. <a href="/invite">Invite someone new →</a></p>
+    <div class="table-scroll">
+    <table class="ledger">
+        <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+        <tbody>
+        {% for u in users %}
+        <tr class="{{ '' if u.is_active else 'is-inactive' }}">
+            <td>{{ u.name }}{% if u.id == user.id %} <span class="hint">(you)</span>{% endif %}</td>
+            <td>{{ u.email }}</td>
+            <td>
+                {% if u.id == user.id %}{{ u.role.value }}
+                {% else %}
+                <form method="post" action="/admin/users/{{ u.id }}/role" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <label class="visually-hidden" for="role-{{ u.id }}">Role for {{ u.name }}</label>
+                    <select id="role-{{ u.id }}" name="role">
+                        {% for r in roles %}<option value="{{ r }}" {% if r == u.role.value %}selected{% endif %}>{{ r }}</option>{% endfor %}
+                    </select>
+                    <button type="submit" class="btn btn-quiet">Change</button>
+                </form>
+                {% endif %}
+            </td>
+            <td>{{ 'Active' if u.is_active else 'Deactivated' }}</td>
+            <td class="row-actions">
+                {% if u.id != user.id %}
+                <form method="post" action="/admin/users/{{ u.id }}/active" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="active" value="{{ 'false' if u.is_active else 'true' }}">
+                    <button type="submit" class="btn {{ 'btn-danger' if u.is_active else 'btn-quiet' }}">{{ 'Deactivate' if u.is_active else 'Reactivate' }}<span class="visually-hidden"> {{ u.name }}</span></button>
+                </form>
+                {% if u.is_active %}
+                <form method="post" action="/admin/users/{{ u.id }}/revoke-sessions" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-quiet">Sign out everywhere<span class="visually-hidden"> ({{ u.name }})</span></button>
+                </form>
+                {% endif %}
+                {% else %}<a href="/account/password">Change my password</a>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</section>
+{% endblock %}

@@ -1536,3 +1536,178 @@ def ticket_conversation(db: Session, ticket_id: int) -> list[dict]:
         items.append({"kind": "call", "visibility": "customer", "at": c.created_at, "obj": c})
     items.sort(key=lambda i: (i["at"] or _utcnow(), i["kind"]))
     return items
+
+
+# --- User administration ----------------------------------------------------
+
+MIN_PASSWORD = 12
+MAX_PASSWORD = 128  # Argon2 cost scales with input; an upper bound prevents hashing megabytes
+
+
+class AdminActionRefused(Exception):
+    """An administrative change that would break an invariant (e.g. leave
+    the system with no active admin). Carries a user-facing message."""
+
+
+def list_users(db: Session) -> list[User]:
+    return db.query(User).order_by(User.is_active.desc(), User.name.asc(), User.id.asc()).all()
+
+
+def revoke_all_sessions(db: Session, user_id: int, except_session_id: Optional[str] = None, commit: bool = True) -> int:
+    """Revokes every live session for a user. `except_session_id` is the RAW
+    cookie value of a session to keep (the one doing a password change)."""
+    query = db.query(SessionModel).filter(SessionModel.user_id == user_id, SessionModel.revoked_at.is_(None))
+    if except_session_id:
+        query = query.filter(SessionModel.id != hash_token(except_session_id))
+    count = query.update({"revoked_at": _utcnow()}, synchronize_session=False)
+    if commit:
+        db.commit()
+    return count
+
+
+def _lock_active_admins(db: Session) -> list[User]:
+    """Locks every active admin row for the rest of the transaction
+    (SELECT ... FOR UPDATE on PostgreSQL; SQLite serializes writers anyway).
+    Without the lock, two admins demoting each other at the same moment
+    could each see 'another admin remains' and both succeed - zero admins."""
+    return (db.query(User)
+            .filter(User.is_active == True, User.role == UserRole.admin)  # noqa: E712
+            .order_by(User.id).with_for_update().all())
+
+
+def _refuse_if_last_admin(db: Session, target: User) -> None:
+    admins = _lock_active_admins(db)
+    if target.is_active and target.role == UserRole.admin and len(admins) <= 1:
+        db.rollback()
+        raise AdminActionRefused("This is the only active admin - make someone else an admin first.")
+
+
+def set_user_active(db: Session, target_id: int, active: bool, actor_user_id: int) -> User:
+    target = get_user(db, target_id)
+    if target is None:
+        raise ValueError(f"User {target_id} not found")
+    if target.id == actor_user_id and not active:
+        raise AdminActionRefused("You can't deactivate your own account.")
+    if target.is_active == active:
+        return target
+    if not active:
+        _refuse_if_last_admin(db, target)
+    target.is_active = active
+    moved = 0
+    if not active:
+        revoke_all_sessions(db, target.id, commit=False)
+        # Their open tickets go back to the shared queue rather than
+        # silently vanishing from every personal view.
+        moved = (db.query(models.Ticket)
+                 .filter(models.Ticket.assignee_id == target.id, models.Ticket.status != models.TicketStatus.resolved)
+                 .update({"assignee_id": None, "version": models.Ticket.version + 1}, synchronize_session=False))
+    _record_audit_event(db, actor_user_id, "user.activated" if active else "user.deactivated", "user", target.id,
+                        details={"tickets_unassigned": moved} if not active else None)
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+def set_user_role(db: Session, target_id: int, role: str, actor_user_id: int) -> User:
+    try:
+        new_role = UserRole(role)
+    except ValueError:
+        raise ValidationError("role", f"must be one of: {', '.join(r.value for r in UserRole)}")
+    target = get_user(db, target_id)
+    if target is None:
+        raise ValueError(f"User {target_id} not found")
+    if target.role == new_role:
+        return target
+    if target.id == actor_user_id:
+        raise AdminActionRefused("You can't change your own role - ask another admin.")
+    if target.role == UserRole.admin:
+        _refuse_if_last_admin(db, target)
+    old = target.role.value
+    target.role = new_role
+    # Privileges changed: end existing sessions so nothing keeps running
+    # under the old role's assumptions.
+    revoke_all_sessions(db, target.id, commit=False)
+    _record_audit_event(db, actor_user_id, "user.role_changed", "user", target.id, details={"from": old, "to": new_role.value})
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+def admin_revoke_sessions(db: Session, target_id: int, actor_user_id: int) -> int:
+    if get_user(db, target_id) is None:
+        raise ValueError(f"User {target_id} not found")
+    count = revoke_all_sessions(db, target_id, commit=False)
+    _record_audit_event(db, actor_user_id, "user.sessions_revoked", "user", target_id, details={"count": count})
+    db.commit()
+    return count
+
+
+def change_own_password(db: Session, user: User, current_password: str, new_password: str, current_session_raw: str) -> int:
+    """Requires the current password; signs out every OTHER session. Returns
+    how many were revoked. The hash never goes into the audit trail."""
+    from app.security import verify_password
+    if not verify_password(current_password or "", user.password_hash):
+        raise ValidationError("current_password", "is incorrect")
+    new_password = new_password or ""
+    if not (MIN_PASSWORD <= len(new_password) <= MAX_PASSWORD):
+        raise ValidationError("new_password", f"must be {MIN_PASSWORD} to {MAX_PASSWORD} characters")
+    if verify_password(new_password, user.password_hash):
+        raise ValidationError("new_password", "must be different from your current password")
+    user.password_hash = hash_password(new_password)
+    revoked = revoke_all_sessions(db, user.id, except_session_id=current_session_raw, commit=False)
+    _record_audit_event(db, user.id, "user.password_changed", "user", user.id, details={"other_sessions_revoked": revoked})
+    db.commit()
+    return revoked
+
+
+class InviteUnavailable(Exception):
+    """The invite is invalid, expired, already used - or was just claimed
+    by a concurrent submission. `status_code` is 400 for an unusable link,
+    409 when the email already has an account."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def validate_new_password(password: Optional[str], field: str = "password") -> str:
+    password = password or ""
+    if not (MIN_PASSWORD <= len(password) <= MAX_PASSWORD):
+        raise ValidationError(field, f"must be {MIN_PASSWORD} to {MAX_PASSWORD} characters")
+    return password
+
+
+def accept_invite(db: Session, raw_token: str, name: str, password: str) -> User:
+    """
+    Atomic invite acceptance (review finding: user creation and marking the
+    invite used were separate commits after a plain validity read, so two
+    concurrent submissions could both pass; the loser hit an unhandled
+    IntegrityError). The invite is CLAIMED with one conditional UPDATE -
+    only one request can flip used_at from NULL - and the user is created
+    in the same transaction, so both happen or neither does.
+    """
+    from sqlalchemy.exc import IntegrityError
+    name = clean_text(name, "name", MAX_NAME, single_line=True)
+    password = validate_new_password(password)
+    now = _utcnow()
+    token_hash = hash_token(raw_token or "")
+    claimed = db.execute(
+        sa_update(Invite)
+        .where(Invite.token == token_hash, Invite.used_at.is_(None), Invite.expires_at > now)
+        .values(used_at=now)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise InviteUnavailable("This invite link is invalid, expired, or already used.")
+    invite = db.query(Invite).filter(Invite.token == token_hash).one()
+    user = User(email=invite.email, name=name, password_hash=hash_password(password), role=invite.role)
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()  # also releases the invite claim
+        raise InviteUnavailable("An account with this email already exists.", status_code=409)
+    _record_audit_event(db, user.id, "user.invite_accepted", "user", user.id, details={"role": invite.role.value})
+    db.commit()
+    db.refresh(user)
+    return user

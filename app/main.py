@@ -719,6 +719,86 @@ def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(
     return response
 
 
+def _users_page(request: Request, db: Session, user: User, settings: Settings, message: Optional[str] = None,
+                error: Optional[str] = None, status_code: int = 200):
+    return templates.TemplateResponse(request, "users.html", {
+        "users": crud.list_users(db), "user": user, "roles": [r.value for r in UserRole],
+        "message": message, "error": error, "csrf_token": csrf_token_for_template(request, settings),
+    }, status_code=status_code)
+
+
+@app.get("/admin/users")
+def admin_users(request: Request, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.admin)),
+                settings: Settings = Depends(get_settings)):
+    return _users_page(request, db, user, settings)
+
+
+def _admin_user_action(request, db, user, settings, action, success_message):
+    try:
+        action()
+    except crud.AdminActionRefused as exc:
+        db.rollback()
+        return _users_page(request, db, user, settings, error=str(exc), status_code=409)
+    except InputValidationError as exc:
+        db.rollback()
+        return _users_page(request, db, user, settings, error=exc.message, status_code=422)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _users_page(request, db, user, settings, message=success_message)
+
+
+@app.post("/admin/users/{target_id}/active", dependencies=[Depends(require_csrf)])
+def admin_set_active(request: Request, target_id: int, active: str = Form(...), db: Session = Depends(get_db),
+                     user: User = Depends(require_role(UserRole.admin)), settings: Settings = Depends(get_settings)):
+    make_active = active == "true"
+    return _admin_user_action(request, db, user, settings,
+                              lambda: crud.set_user_active(db, target_id, make_active, user.id),
+                              "Account reactivated." if make_active else
+                              "Account deactivated. Their sessions were ended and open tickets moved to Unassigned.")
+
+
+@app.post("/admin/users/{target_id}/role", dependencies=[Depends(require_csrf)])
+def admin_set_role(request: Request, target_id: int, role: str = Form(...), db: Session = Depends(get_db),
+                   user: User = Depends(require_role(UserRole.admin)), settings: Settings = Depends(get_settings)):
+    return _admin_user_action(request, db, user, settings,
+                              lambda: crud.set_user_role(db, target_id, role, user.id),
+                              "Role updated. Their existing sessions were ended so the new role applies immediately.")
+
+
+@app.post("/admin/users/{target_id}/revoke-sessions", dependencies=[Depends(require_csrf)])
+def admin_revoke(request: Request, target_id: int, db: Session = Depends(get_db),
+                 user: User = Depends(require_role(UserRole.admin)), settings: Settings = Depends(get_settings)):
+    return _admin_user_action(request, db, user, settings,
+                              lambda: crud.admin_revoke_sessions(db, target_id, user.id),
+                              "All of that user's sessions were ended.")
+
+
+@app.get("/account/password")
+def password_form(request: Request, db: Session = Depends(get_db), user: User = Depends(require_agent),
+                  settings: Settings = Depends(get_settings)):
+    return templates.TemplateResponse(request, "password.html", {"user": user, "error": None, "message": None,
+                                      "csrf_token": csrf_token_for_template(request, settings)})
+
+
+@app.post("/account/password", dependencies=[Depends(require_csrf)])
+@limiter.limit(settings.login_rate_limit)
+def password_change(request: Request, current_password: str = Form(...), new_password: str = Form(...),
+                    confirm_password: str = Form(...), db: Session = Depends(get_db),
+                    user: User = Depends(require_agent), settings: Settings = Depends(get_settings)):
+    def render(error=None, message=None, code=200):
+        return templates.TemplateResponse(request, "password.html", {"user": user, "error": error, "message": message,
+                                          "csrf_token": csrf_token_for_template(request, settings)}, status_code=code)
+    if new_password != confirm_password:
+        return render(error="The two new passwords don't match.", code=422)
+    try:
+        revoked = crud.change_own_password(db, user, current_password, new_password,
+                                           request.cookies.get(SESSION_COOKIE_NAME))
+    except InputValidationError as exc:
+        db.rollback()
+        return render(error=f"Password not changed - {exc.field.replace('_', ' ')} {exc.message}.", code=422)
+    return render(message=f"Password changed. {revoked} other session(s) were signed out.")
+
+
 @app.get("/invite")
 def invite_form(request: Request, user: User = Depends(require_role(UserRole.admin)), settings: Settings = Depends(get_settings)):
     return templates.TemplateResponse(
@@ -775,28 +855,22 @@ def accept_invite_submit(
     password: str = Form(...),
     db: Session = Depends(get_db),
 ):
-    invite = crud.get_valid_invite(db, token)
-    if invite is None:
+    """One atomic operation (crud.accept_invite): the invite is claimed and
+    the account created together, or not at all."""
+    try:
+        user = crud.accept_invite(db, token, name, password)
+    except InputValidationError as exc:
+        invite = crud.get_valid_invite(db, token)
         return templates.TemplateResponse(
             request, "accept_invite.html",
-            {"token": token, "invite": None, "error": "This invite link is invalid, expired, or already used."},
-            status_code=400,
-        )
-    if len(password) < 8:
-        return templates.TemplateResponse(
-            request, "accept_invite.html",
-            {"token": token, "invite": invite, "error": "Password must be at least 8 characters."},
+            {"token": token, "invite": invite, "error": f"Account not created - {exc.field} {exc.message}."},
             status_code=422,
         )
-    if crud.get_user_by_email(db, invite.email) is not None:
+    except crud.InviteUnavailable as exc:
         return templates.TemplateResponse(
-            request, "accept_invite.html",
-            {"token": token, "invite": None, "error": "An account with this email already exists."},
-            status_code=409,
+            request, "accept_invite.html", {"token": token, "invite": None, "error": str(exc)},
+            status_code=exc.status_code,
         )
-
-    user = crud.create_user(db, email=invite.email, name=name, password=password, role=invite.role)
-    crud.mark_invite_used(db, invite)
     raw_token, session = crud.create_session(db, user.id, ttl_hours=settings.session_ttl_hours)
     response = RedirectResponse(url="/", status_code=303)
     _set_auth_cookie(response, SESSION_COOKIE_NAME, raw_token, max_age=settings.session_ttl_hours * 3600)

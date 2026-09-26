@@ -153,13 +153,13 @@ def test_invite_cannot_be_used_twice(admin_client, client):
     resp = admin_client.post("/invite", data={"email": "onceonly@example.com", "role": "agent", "csrf_token": csrf})
     token = re.search(r"accept-invite\?token=([\w\-]+)", resp.text).group(1)
 
-    first = client.post("/accept-invite", data={"token": token, "name": "First", "password": "password123"}, follow_redirects=False)
+    first = client.post("/accept-invite", data={"token": token, "name": "First", "password": "first-password-123"}, follow_redirects=False)
     assert first.status_code == 303
 
     from fastapi.testclient import TestClient
     from app.main import app
     second_client = TestClient(app)
-    second = second_client.post("/accept-invite", data={"token": token, "name": "Second", "password": "password456"})
+    second = second_client.post("/accept-invite", data={"token": token, "name": "Second", "password": "second-password-456"})
     assert second.status_code == 400
 
 

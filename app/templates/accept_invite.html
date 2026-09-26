@@ -17,7 +17,7 @@
             <label for="name">Your name</label>
             <input type="text" id="name" name="name" required autofocus>
             <label for="password">Choose a password</label>
-            <input type="password" id="password" name="password" required minlength="8">
+            <input type="password" id="password" name="password" required minlength="12" maxlength="128" autocomplete="new-password">
             <button type="submit" class="btn">Create account</button>
         </form>
         {% endif %}
