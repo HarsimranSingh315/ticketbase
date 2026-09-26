@@ -40,16 +40,24 @@
 </section>
 
 <section class="panel">
+    {% if owner_urls is defined %}
+    <nav class="queue-tabs" aria-label="Ownership">
+        <a href="{{ owner_urls.all }}" {% if not current_owner %}aria-current="page" class="active"{% endif %}>Everyone's</a>
+        <a href="{{ owner_urls.mine }}" {% if current_owner == 'mine' %}aria-current="page" class="active"{% endif %}>My tickets <span class="count">{{ queue_counts.mine }}</span></a>
+        <a href="{{ owner_urls.unassigned }}" {% if current_owner == 'unassigned' %}aria-current="page" class="active"{% endif %}>Unassigned <span class="count">{{ queue_counts.unassigned }}</span></a>
+    </nav>
+    {% endif %}
     <div class="list-controls">
         <div class="tabs">
-            <a href="/{{ '?q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if not current_status and not current_sla else '' }}">All</a>
-            <a href="/?status=open{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
-            <a href="/?status=in_progress{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
-            <a href="/?status=resolved{{ '&q=' ~ (current_q|urlencode) if current_q }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
+            <a href="/?{{ 'q=' ~ (current_q|urlencode) if current_q }}{{ '&owner=' ~ current_owner if current_owner }}" class="{{ 'active' if not current_status and not current_sla else '' }}">All</a>
+            <a href="/?status=open{{ '&q=' ~ (current_q|urlencode) if current_q }}{{ '&owner=' ~ current_owner if current_owner }}" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+            <a href="/?status=in_progress{{ '&q=' ~ (current_q|urlencode) if current_q }}{{ '&owner=' ~ current_owner if current_owner }}" class="{{ 'active' if current_status == 'in_progress' else '' }}">In progress</a>
+            <a href="/?status=resolved{{ '&q=' ~ (current_q|urlencode) if current_q }}{{ '&owner=' ~ current_owner if current_owner }}" class="{{ 'active' if current_status == 'resolved' else '' }}">Resolved</a>
             <a href="/?sla=breached" class="{{ 'active tabs-breached' if current_sla == 'breached' else 'tabs-breached' }}">Needs attention{% if breached_ids %} ({{ breached_ids|length }}){% endif %}</a>
         </div>
         <form method="get" action="/" class="search-form">
             {% if current_status %}<input type="hidden" name="status" value="{{ current_status }}">{% endif %}
+            {% if current_owner %}<input type="hidden" name="owner" value="{{ current_owner }}">{% endif %}
             <input type="search" name="q" value="{{ current_q or '' }}" placeholder="Search descriptions…">
         </form>
     </div>

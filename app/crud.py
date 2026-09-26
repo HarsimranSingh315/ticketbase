@@ -18,7 +18,7 @@ from sqlalchemy import update as sa_update
 from app import models
 from app.models import User, Session as SessionModel, Invite, UserRole, Customer, Contact, AuditEvent
 from app.rules import compute_priority
-from app.validation import (validate_status, validate_category, validate_email, clean_text,
+from app.validation import (ValidationError, validate_status, validate_category, validate_email, clean_text,
                             MAX_NAME, MAX_SUBJECT, MAX_BODY, MAX_DESCRIPTION)
 from app.security import hash_password, generate_token, hash_token
 
@@ -300,6 +300,14 @@ def confirm_category(db: Session, ticket_id: int, category: str, expected_versio
 def assign_ticket(db: Session, ticket_id: int, assignee_user_id: Optional[int], expected_version: int, actor_user_id: Optional[int] = None) -> Optional[models.Ticket]:
     """Assigns (or, with assignee_user_id=None, unassigns) a ticket.
     Same version-conflict and audit-trail pattern as the other writes."""
+    if assignee_user_id is not None:
+        # Only an existing, ACTIVE admin or agent can own a ticket. Verified
+        # gaps before this check: a nonexistent ID was stored (SQLite doesn't
+        # enforce the FK; PostgreSQL raised a 500), and read-only reviewers
+        # and deactivated accounts could be assigned work they can't do.
+        assignee = get_user(db, assignee_user_id)
+        if assignee is None or not assignee.is_active or assignee.role not in (UserRole.admin, UserRole.agent):
+            raise ValidationError("assignee", "must be an active agent or admin")
     current = get_ticket(db, ticket_id)
     if current is None:
         return None
@@ -1441,7 +1449,8 @@ def _like_term(q: str) -> str:
 
 
 def ticket_page(db: Session, status: Optional[str] = None, q: Optional[str] = None,
-                page: int = 1, page_size: int = 20) -> Page:
+                page: int = 1, page_size: int = 20, owner: Optional[str] = None,
+                user_id: Optional[int] = None) -> Page:
     """Ticket list for the UI. An unrecognized status is ignored rather than
     passed to the database: on PostgreSQL an invalid enum literal raised
     DataError (a 500 from a hand-edited URL) - reproduced before this fix."""
@@ -1450,7 +1459,21 @@ def ticket_page(db: Session, status: Optional[str] = None, q: Optional[str] = No
         query = query.filter(models.Ticket.status == status)
     if q and q.strip():
         query = query.filter(models.Ticket.description.ilike(_like_term(q.strip()), escape="\\"))
+    # Ownership queues. Unknown values are ignored, like unknown statuses.
+    if owner == "mine" and user_id is not None:
+        query = query.filter(models.Ticket.assignee_id == user_id)
+    elif owner == "unassigned":
+        query = query.filter(models.Ticket.assignee_id.is_(None))
     return paginate(query.order_by(models.Ticket.created_at.desc(), models.Ticket.id.desc()), page, page_size)
+
+
+def queue_counts(db: Session, user_id: int) -> dict:
+    """Unresolved tickets in each ownership queue, for the tab badges."""
+    unresolved = db.query(models.Ticket).filter(models.Ticket.status != models.TicketStatus.resolved)
+    return {
+        "mine": unresolved.filter(models.Ticket.assignee_id == user_id).count(),
+        "unassigned": unresolved.filter(models.Ticket.assignee_id.is_(None)).count(),
+    }
 
 
 def customer_page(db: Session, q: Optional[str] = None, page: int = 1, page_size: int = 20) -> Page:

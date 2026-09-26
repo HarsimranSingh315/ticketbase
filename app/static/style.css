@@ -668,3 +668,9 @@ details.disclosure summary {
 @media (max-width: 600px) {
   .site-header { flex-direction: column; align-items: flex-start; }
 }
+
+/* Ownership queues */
+.queue-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
+.queue-tabs a { padding: 0.35rem 0.75rem; border: 1px solid var(--rule-strong); border-radius: 999px; text-decoration: none; color: var(--ink); font-size: 0.9rem; }
+.queue-tabs a.active { background: var(--ink); color: var(--paper, #fff); border-color: var(--ink); }
+.queue-tabs .count { font-variant-numeric: tabular-nums; opacity: 0.8; margin-left: 0.2rem; }

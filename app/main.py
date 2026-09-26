@@ -825,7 +825,7 @@ def _pager_links(request: Request, pager: "crud.Page") -> dict:
 @app.get("/")
 def ui_index(
     request: Request, status: Optional[str] = None, q: Optional[str] = None, sla: Optional[str] = None,
-    page: int = Query(default=1, ge=1, le=100_000),
+    page: int = Query(default=1, ge=1, le=100_000), owner: Optional[str] = None,
     db: Session = Depends(get_db), user: User = Depends(require_agent),
     settings: Settings = Depends(get_settings),
 ):
@@ -843,7 +843,8 @@ def ui_index(
         current = min(page, pages)
         pager = crud.Page(items=breached[(current - 1) * size: current * size], total=len(breached), page=current, page_size=size)
     else:
-        pager = crud.ticket_page(db, status=status, q=q, page=page, page_size=settings.default_page_size)
+        pager = crud.ticket_page(db, status=status, q=q, page=page, page_size=settings.default_page_size,
+                                 owner=owner, user_id=user.id)
         breached_ids = {t.id for t in crud.list_breached_tickets(db, sla_hours)}
     tickets = pager.items
 
@@ -853,6 +854,13 @@ def ui_index(
         {
             "tickets": tickets, "current_status": status, "current_q": q, "current_sla": sla,
             "stats": stats, "breached_ids": breached_ids, "pager": pager, **_pager_links(request, pager),
+            "current_owner": owner if owner in ("mine", "unassigned") else None,
+            "queue_counts": crud.queue_counts(db, user.id),
+            "owner_urls": {
+                "all": str(request.url.remove_query_params(["owner", "page"])),
+                "mine": str(request.url.remove_query_params("page").include_query_params(owner="mine")),
+                "unassigned": str(request.url.remove_query_params("page").include_query_params(owner="unassigned")),
+            },
             "user": user, "csrf_token": csrf_token_for_template(request, settings),
         },
     )
@@ -1055,9 +1063,14 @@ def ui_assign_ticket(
     # Form(...) param (confirmed directly - it 422s with "Field
     # required" rather than delivering ""), so making it required would
     # make unassigning impossible through this route.
-    parsed_assignee_id = int(assignee_id) if assignee_id else None
+    try:
+        parsed_assignee_id = int(assignee_id) if assignee_id else None
+    except ValueError:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, "Couldn't assign - choose someone from the list.")
     try:
         ticket = crud.assign_ticket(db, ticket_id, parsed_assignee_id, expected_version=version, actor_user_id=user.id)
+    except InputValidationError as e:
+        return _render_ticket_error(request, db, ticket_id, rag_index, user, settings, f"Couldn't assign - {e.message}.")
     except crud.VersionConflict:
         return _render_conflict(request, db, ticket_id, rag_index, user, settings)
     if ticket is None:

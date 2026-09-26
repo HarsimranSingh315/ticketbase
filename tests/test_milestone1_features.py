@@ -333,3 +333,63 @@ def test_b9_customer_history_is_paginated_not_capped(admin_client, db_session):
     db_session.commit()
     r = admin_client.get(f"/customers/{c.id}")
     assert "of 55" in r.text  # the old silent cap was 50
+
+
+def _assign(client, db_session, ticket_id, value):
+    from app import crud
+    from tests.conftest import get_csrf_token
+    db_session.expire_all()
+    v = crud.get_ticket(db_session, ticket_id).version
+    csrf = get_csrf_token(client, f"/ui/tickets/{ticket_id}")
+    return client.post(f"/ui/tickets/{ticket_id}/assign", data={"assignee_id": value, "version": v, "csrf_token": csrf}, follow_redirects=False)
+
+
+def test_assignment_rejects_invalid_targets_and_stores_nothing(admin_client, db_session):
+    """Each case reproduced before the fix: 'abc' raised ValueError (500);
+    99999, a reviewer and a deactivated agent were all stored."""
+    from app import crud
+    from app.models import UserRole
+    t = admin_client.post("/tickets", json={"description": "assign"}).json()
+    rev = crud.create_user(db_session, email="rev@x.test", name="Rev", password="pw-12345678", role=UserRole.reviewer)
+    gone = crud.create_user(db_session, email="gone@x.test", name="Gone", password="pw-12345678", role=UserRole.agent)
+    gone.is_active = False
+    db_session.commit()
+    for value in ["abc", "99999", str(rev.id), str(gone.id)]:
+        r = _assign(admin_client, db_session, t["id"], value)
+        assert r.status_code == 422, value
+        db_session.expire_all()
+        assert crud.get_ticket(db_session, t["id"]).assignee_id is None, value
+
+
+def test_assignment_to_active_agent_and_unassign_still_work(admin_client, db_session):
+    from app import crud
+    from app.models import UserRole
+    t = admin_client.post("/tickets", json={"description": "assign ok"}).json()
+    agent = crud.create_user(db_session, email="ok@x.test", name="Ok", password="pw-12345678", role=UserRole.agent)
+    assert _assign(admin_client, db_session, t["id"], str(agent.id)).status_code == 303
+    db_session.expire_all()
+    assert crud.get_ticket(db_session, t["id"]).assignee_id == agent.id
+    assert _assign(admin_client, db_session, t["id"], "").status_code == 303
+    db_session.expire_all()
+    assert crud.get_ticket(db_session, t["id"]).assignee_id is None
+
+
+def test_my_tickets_and_unassigned_queues(admin_client, db_session):
+    from app import crud
+    from app.models import User
+    me = db_session.query(User).filter(User.email == "test-admin@example.com").one()
+    mine = crud.create_ticket(db_session, "QUEUE-mine ticket")
+    crud.create_ticket(db_session, "QUEUE-unassigned ticket")
+    mine.assignee_id = me.id
+    db_session.commit()
+    mine_page = admin_client.get("/", params={"owner": "mine"}).text
+    assert "QUEUE-mine" in mine_page and "QUEUE-unassigned" not in mine_page
+    un_page = admin_client.get("/", params={"owner": "unassigned"}).text
+    assert "QUEUE-unassigned" in un_page and "QUEUE-mine" not in un_page
+    assert 'aria-current="page"' in un_page
+
+
+def test_ownership_filter_survives_status_tabs_and_search(admin_client):
+    page = admin_client.get("/", params={"owner": "mine"}).text
+    assert "status=open" in page and "owner=mine" in page
+    assert '<input type="hidden" name="owner" value="mine">' in page
