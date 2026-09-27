@@ -193,3 +193,21 @@ def test_unknown_email_login_still_performs_password_verification(client, monkey
     r = _login(client, "nobody-here@example.com", "whatever")
     assert r.status_code == 401
     assert len(calls) == 1
+
+
+def test_strict_startup_names_the_schema_mismatch_in_one_line(db_session, monkeypatch):
+    """Render incident: a missing migration surfaced only as 'relation
+    "kb_state" does not exist'. Startup now states both versions and the fix."""
+    import app.main as main_mod
+    from app.config import Settings, validate_settings
+    prod = validate_settings(Settings(environment="production", secret_key=STRONG, api_key="k" * 48, database_url="sqlite://"))
+    monkeypatch.setattr(main_mod, "settings", prod)
+    with pytest.raises(main_mod.SchemaNotMigrated) as exc:
+        main_mod.check_schema_or_refuse(db_session)   # test DB is created by create_all: no alembic_version
+    msg = str(exc.value)
+    assert "NO RECORDED VERSION" in msg and "alembic upgrade head" in msg
+
+
+def test_development_startup_skips_the_schema_check(db_session):
+    import app.main as main_mod
+    main_mod.check_schema_or_refuse(db_session)  # default test settings are development: must not raise

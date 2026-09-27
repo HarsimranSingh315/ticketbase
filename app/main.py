@@ -74,6 +74,36 @@ def _bootstrap_admin_if_needed(db: Session) -> None:
     logger.info("Bootstrap admin account created: %s", settings.bootstrap_admin_email)
 
 
+class SchemaNotMigrated(RuntimeError):
+    """The database isn't at the migration head this build expects."""
+
+
+def check_schema_or_refuse(db: Session) -> None:
+    """
+    In strict environments, refuse to start with ONE clear line when the
+    schema doesn't match this build, instead of a long traceback from the
+    first query that happens to touch a missing table (what happened on the
+    first Render deploy: 'relation "kb_state" does not exist' with no hint
+    that migrations hadn't run). Development keeps auto-create behaviour.
+    """
+    from sqlalchemy import text
+    from app.config import STRICT_ENVIRONMENTS
+    if settings.environment not in STRICT_ENVIRONMENTS:
+        return
+    expected = _expected_migration_head()
+    try:
+        current = db.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except Exception:
+        db.rollback()
+        current = None
+    if expected and current != expected:
+        message = (f"Database schema is at {current or 'NO RECORDED VERSION (never migrated)'}, "
+                   f"but this build needs {expected}. Run 'alembic upgrade head' against this database "
+                   f"(pre-deploy command, RUN_MIGRATIONS_ON_START=true, or the migrate job) and restart.")
+        logger.critical(message)
+        raise SchemaNotMigrated(message)
+
+
 def load_initial_index(state, db: Session) -> None:
     """Startup index load. B4 safe-unavailable state: if the persisted KB
     can't be indexed, serve with an empty index (every suggestion
@@ -103,6 +133,7 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
+        check_schema_or_refuse(db)
         load_initial_index(app.state, db)
         _bootstrap_admin_if_needed(db)
     finally:

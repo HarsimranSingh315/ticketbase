@@ -1,0 +1,44 @@
+# Builds and publishes the Docker image to GitHub Container Registry (ghcr.io),
+# but ONLY after the "CI" workflow succeeded on main - untested code never
+# becomes a deployable image. Deploying to Azure stays a deliberate manual step
+# (docs/AZURE_DEPLOY.md) while you're learning.
+name: Publish image
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}   # exactly the commit CI tested
+
+      - name: Lowercase image name (ghcr.io requires lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ticketbase" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Show the image to deploy
+        run: echo "Deploy this exact image -> ${IMAGE}:${{ github.event.workflow_run.head_sha }}"

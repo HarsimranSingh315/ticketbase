@@ -114,3 +114,13 @@ Status: `OPEN` / `DONE` / `DECIDED`.
   webhook secret added". No secrets in the reply.
 - **Blocks:** reply ingestion, password-reset email.
 - **Meanwhile I continue:** Phase 4 UI and Phase 5 AI safety.
+
+## H9 - Azure account and budget  `OPEN`
+- **Priority:** P1 (blocks the Azure deployment).
+- **Why you:** needs your identity, phone and a card.
+- **Steps:** create the Azure free account; immediately add a **$5 monthly
+  budget** with email alerts (docs/AZURE_DEPLOY.md step 0); upgrade to
+  pay-as-you-go within 30 days to keep the 12-month free services.
+- **Cost:** $0 if you stay inside the free amounts; the budget alert warns you if not.
+- **Confirm by replying:** "H9 done - budget set". No card or account details.
+- **Then:** follow docs/AZURE_DEPLOY.md steps 1-7.
